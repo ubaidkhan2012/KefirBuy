@@ -15,7 +15,7 @@ jobs:
     steps:
       - name: Create the app files
         run: |
-          mkdir -p app app/src/main app/src/main/java/com/kefirbuy/app app/src/main/res/mipmap-anydpi-v26 app/src/main/res/values app/src/main/res/values-v31
+          mkdir -p app app/src/main app/src/main/assets/app-shell app/src/main/java/com/kefirbuy/app app/src/main/res/mipmap-anydpi-v26 app/src/main/res/values app/src/main/res/values-v31
           cat > settings.gradle <<'END_OF_FILE_0'
           pluginManagement {
               repositories {
@@ -57,8 +57,8 @@ jobs:
                   applicationId 'com.kefirbuy.app'
                   minSdk 23
                   targetSdk 34
-                  versionCode 1
-                  versionName '1.0'
+                  versionCode 2
+                  versionName '2.0'
               }
 
               buildTypes {
@@ -81,6 +81,7 @@ jobs:
 
           dependencies {
               implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+              implementation 'androidx.webkit:webkit:1.11.0'
           }
           END_OF_FILE_3
           cat > app/src/main/AndroidManifest.xml <<'END_OF_FILE_4'
@@ -183,6 +184,7 @@ jobs:
           import android.os.Bundle;
           import android.os.Handler;
           import android.os.Looper;
+          import android.text.TextUtils;
           import android.view.Gravity;
           import android.view.View;
           import android.view.ViewGroup;
@@ -191,6 +193,7 @@ jobs:
           import android.webkit.WebChromeClient;
           import android.webkit.WebResourceError;
           import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
           import android.webkit.WebSettings;
           import android.webkit.WebView;
           import android.webkit.WebViewClient;
@@ -202,10 +205,17 @@ jobs:
           import android.widget.TextView;
 
           import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
+          import androidx.webkit.WebViewAssetLoader;
+
+          import java.io.IOException;
+          import java.io.InputStream;
 
           public class MainActivity extends Activity {
 
-              private static final String HOME = "https://kefirbuy.com/";
+              // The app screens are packed inside the APK and served as if they were on kefirbuy.com,
+              // so the cart, login and checkout are shared with the real website.
+              private static final String SHELL_PATH = "/app-shell/";
+              private static final String HOME = "https://kefirbuy.com/app-shell/index.html";
               private static final String SITE_HOST = "kefirbuy.com";
               private static final int FILE_REQUEST = 1001;
               private static final long SPLASH_MAX_MS = 8000;
@@ -233,6 +243,9 @@ jobs:
               private ProgressBar bar;
               private LinearLayout offline;
               private FrameLayout splash;
+              private LinearLayout topBar;
+              private TextView topTitle;
+              private WebViewAssetLoader assetLoader;
               private ValueCallback<Uri[]> fileCallback;
               private boolean pageFailed = false;
               private final Handler handler = new Handler(Looper.getMainLooper());
@@ -241,8 +254,16 @@ jobs:
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
 
+                  LinearLayout outer = new LinearLayout(this);
+                  outer.setOrientation(LinearLayout.VERTICAL);
+                  outer.setBackgroundColor(CREAM);
+                  topBar = buildTopBar();
+                  topBar.setVisibility(View.GONE);
+                  outer.addView(topBar, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(56)));
+
                   FrameLayout root = new FrameLayout(this);
                   root.setBackgroundColor(CREAM);
+                  outer.addView(root, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
                   swipe = new SwipeRefreshLayout(this);
                   swipe.setColorSchemeColors(DEEP_SAGE_GREEN, WARM_AMBER);
@@ -267,7 +288,7 @@ jobs:
                   splash = buildSplashView();
                   root.addView(splash, matchParent());
 
-                  setContentView(root);
+                  setContentView(outer);
                   setupWebView();
 
                   swipe.setOnChildScrollUpCallback((parent, child) -> web.getScrollY() > 0);
@@ -289,6 +310,18 @@ jobs:
               }
 
               private void setupWebView() {
+                  assetLoader = new WebViewAssetLoader.Builder()
+                          .setDomain(SITE_HOST)
+                          .addPathHandler(SHELL_PATH, path -> {
+                              try {
+                                  InputStream in = getAssets().open("app-shell/" + (path.isEmpty() ? "index.html" : path));
+                                  return new WebResourceResponse(mimeType(path), "utf-8", in);
+                              } catch (IOException e) {
+                                  return null;
+                              }
+                          })
+                          .build();
+
                   WebSettings s = web.getSettings();
                   s.setJavaScriptEnabled(true);
                   s.setDomStorageEnabled(true);
@@ -310,9 +343,22 @@ jobs:
                       }
 
                       @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          return assetLoader.shouldInterceptRequest(request.getUrl());
+                      }
+
+                      @Override
+                      public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                          updateChrome(url);
+                      }
+
+                      @Override
                       public void onPageStarted(WebView view, String url, Bitmap favicon) {
                           pageFailed = false;
-                          bar.setVisibility(View.VISIBLE);
+                          updateChrome(url);
+                          if (!isShell(url)) {
+                              bar.setVisibility(View.VISIBLE);
+                          }
                       }
 
                       @Override
@@ -336,9 +382,16 @@ jobs:
 
                   web.setWebChromeClient(new WebChromeClient() {
                       @Override
+                      public void onReceivedTitle(WebView view, String title) {
+                          if (topTitle != null && title != null && !title.startsWith("http")) {
+                              topTitle.setText(cleanTitle(title));
+                          }
+                      }
+
+                      @Override
                       public void onProgressChanged(WebView view, int progress) {
                           bar.setProgress(progress);
-                          bar.setVisibility(progress < 100 ? View.VISIBLE : View.GONE);
+                          bar.setVisibility(progress < 100 && !isShell(view.getUrl()) ? View.VISIBLE : View.GONE);
                           if (progress >= 80) {
                               hideSplash();
                           }
@@ -410,6 +463,102 @@ jobs:
                       startActivity(new Intent(Intent.ACTION_VIEW, uri));
                   } catch (ActivityNotFoundException ignored) {
                   }
+              }
+
+              private static boolean isShell(String url) {
+                  if (url == null) return false;
+                  Uri u = Uri.parse(url);
+                  return SITE_HOST.equals(u.getHost()) && u.getPath() != null && u.getPath().startsWith(SHELL_PATH);
+              }
+
+              private static String mimeType(String path) {
+                  if (path.endsWith(".js")) return "application/javascript";
+                  if (path.endsWith(".css")) return "text/css";
+                  if (path.endsWith(".png")) return "image/png";
+                  if (path.endsWith(".svg")) return "image/svg+xml";
+                  if (path.endsWith(".json")) return "application/json";
+                  return "text/html";
+              }
+
+              private static String cleanTitle(String title) {
+                  String t = title;
+                  int cut = t.lastIndexOf(" - ");
+                  if (cut < 0) cut = t.lastIndexOf(" – ");
+                  if (cut < 0) cut = t.lastIndexOf(" | ");
+                  if (cut > 0) t = t.substring(0, cut);
+                  return t.trim();
+              }
+
+              /** App screens have their own design; website pages (checkout, account) get a native top bar. */
+              private void updateChrome(String url) {
+                  boolean shell = isShell(url);
+                  topBar.setVisibility(shell ? View.GONE : View.VISIBLE);
+                  swipe.setEnabled(!shell);
+                  if (shell) {
+                      bar.setVisibility(View.GONE);
+                  } else if (url != null) {
+                      String path = Uri.parse(url).getPath();
+                      if (path != null && path.contains("/checkout")) {
+                          topTitle.setText(path.contains("order-received") ? "Order placed" : "Checkout");
+                      }
+                  }
+              }
+
+              private void goBackOrHome() {
+                  String url = web.getUrl();
+                  if (url != null && url.contains("/order-received/")) {
+                      goHome();
+                      return;
+                  }
+                  if (web.canGoBack()) {
+                      showOffline(false);
+                      web.goBack();
+                  } else {
+                      goHome();
+                  }
+              }
+
+              private void goHome() {
+                  showOffline(false);
+                  web.loadUrl(HOME + "#/");
+              }
+
+              private LinearLayout buildTopBar() {
+                  LinearLayout row = new LinearLayout(this);
+                  row.setOrientation(LinearLayout.HORIZONTAL);
+                  row.setGravity(Gravity.CENTER_VERTICAL);
+                  row.setBackgroundColor(Color.WHITE);
+                  row.setElevation(dp(2));
+                  row.setPadding(dp(4), 0, dp(12), 0);
+
+                  TextView back = new TextView(this);
+                  back.setText("\u2190");
+                  back.setTextSize(24);
+                  back.setTextColor(SLATE_INK);
+                  back.setGravity(Gravity.CENTER);
+                  back.setOnClickListener(v -> goBackOrHome());
+                  row.addView(back, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+                  topTitle = new TextView(this);
+                  topTitle.setText("KefirBuy");
+                  topTitle.setTextSize(17);
+                  topTitle.setTypeface(Typeface.DEFAULT_BOLD);
+                  topTitle.setTextColor(SLATE_INK);
+                  topTitle.setSingleLine(true);
+                  topTitle.setEllipsize(TextUtils.TruncateAt.END);
+                  row.addView(topTitle, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+                  TextView shop = new TextView(this);
+                  shop.setText("Shop");
+                  shop.setTextSize(14);
+                  shop.setTypeface(Typeface.DEFAULT_BOLD);
+                  shop.setTextColor(Color.WHITE);
+                  shop.setGravity(Gravity.CENTER);
+                  shop.setBackground(roundedRect(DEEP_SAGE_GREEN));
+                  shop.setPadding(dp(16), 0, dp(16), 0);
+                  shop.setOnClickListener(v -> goHome());
+                  row.addView(shop, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)));
+                  return row;
               }
 
               private void showOffline(boolean show) {
@@ -554,7 +703,10 @@ jobs:
 
               @Override
               public void onBackPressed() {
-                  if (web.canGoBack()) {
+                  String url = web.getUrl();
+                  if (!isShell(url) && url != null) {
+                      goBackOrHome();
+                  } else if (web.canGoBack()) {
                       showOffline(false);
                       web.goBack();
                   } else {
@@ -588,7 +740,1293 @@ jobs:
               }
           }
           END_OF_FILE_8
-          cat > make_icons.py <<'END_OF_FILE_9'
+          cat > app/src/main/assets/app-shell/index.html <<'END_OF_FILE_9'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+            <meta name="theme-color" content="#38593B">
+            <title>KefirBuy</title>
+            <link rel="preconnect" href="https://fonts.googleapis.com">
+            <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+            <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap">
+            <link rel="stylesheet" href="app.css">
+          </head>
+          <body>
+            <main id="view" aria-live="polite"></main>
+
+            <nav id="tabbar" class="tabbar" aria-label="Main">
+              <a href="#/" data-tab="home"><span class="ico" data-icon="home"></span><span>Home</span></a>
+              <a href="#/categories" data-tab="categories"><span class="ico" data-icon="grid"></span><span>Categories</span></a>
+              <a href="#/cart" data-tab="cart"><span class="ico" data-icon="cart"></span><span>Cart</span><b id="cartBadge" class="badge" hidden>0</b></a>
+              <a href="#/wishlist" data-tab="wishlist"><span class="ico" data-icon="heart"></span><span>Wishlist</span></a>
+              <a href="#/account" data-tab="account"><span class="ico" data-icon="user"></span><span>Account</span></a>
+            </nav>
+
+            <div id="toast" class="toast" role="status"></div>
+            <script src="app.js"></script>
+          </body>
+          </html>
+          END_OF_FILE_9
+          cat > app/src/main/assets/app-shell/app.css <<'END_OF_FILE_10'
+          /* KefirBuy app — brand tokens */
+          :root {
+            --green: #38593B;
+            --green-dark: #2C472F;
+            --sage: #DFE8D7;
+            --cream: #FDFBF7;
+            --amber: #D97706;
+            --amber-dark: #B45F04;
+            --ink: #1E293B;
+            --muted: #64748B;
+            --border: #E7E0D3;
+            --surface: #FFFFFF;
+            --page: #F5F2EC;
+            --radius: 16px;
+            --radius-sm: 10px;
+            --shadow: 0 1px 2px rgba(30, 41, 59, .06), 0 4px 14px rgba(30, 41, 59, .06);
+            --shadow-up: 0 -4px 18px rgba(30, 41, 59, .08);
+            --tabbar-h: 62px;
+            --font: "Plus Jakarta Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+          }
+
+          * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+          html { background: var(--page); }
+          body {
+            margin: 0;
+            font-family: var(--font);
+            color: var(--ink);
+            background: var(--page);
+            font-size: 14px;
+            line-height: 1.45;
+            -webkit-font-smoothing: antialiased;
+            overscroll-behavior-y: none;
+            padding-bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+          }
+          body.no-tabbar { padding-bottom: 0; }
+          a { color: inherit; text-decoration: none; }
+          button { font: inherit; color: inherit; border: 0; background: none; cursor: pointer; padding: 0; }
+          input { font: inherit; color: inherit; }
+          img { display: block; max-width: 100%; }
+          .ico svg { width: 22px; height: 22px; display: block; }
+          [hidden] { display: none !important; }
+
+          /* ---------- page transition ---------- */
+          .page { animation: pageIn .26s cubic-bezier(.2, .8, .2, 1); min-height: 100vh; }
+          .page.back { animation-name: pageBack; }
+          @keyframes pageIn { from { opacity: 0; transform: translateX(18px); } to { opacity: 1; transform: none; } }
+          @keyframes pageBack { from { opacity: 0; transform: translateX(-18px); } to { opacity: 1; transform: none; } }
+
+          /* ---------- headers ---------- */
+          .home-head {
+            background: linear-gradient(160deg, var(--green) 0%, var(--green-dark) 100%);
+            color: #fff;
+            padding: 14px 16px 18px;
+            border-radius: 0 0 24px 24px;
+          }
+          .brand-row { display: flex; align-items: center; gap: 10px; }
+          .brand-mark {
+            width: 38px; height: 38px; border-radius: 12px; background: var(--cream);
+            display: grid; place-items: center; flex: none;
+          }
+          .brand-mark img { width: 22px; }
+          .brand-text { flex: 1; min-width: 0; }
+          .brand-text b { display: block; font-size: 18px; font-weight: 800; letter-spacing: -.01em; }
+          .brand-text small { display: block; font-size: 12px; opacity: .8; }
+          .head-btn {
+            width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+            background: rgba(255, 255, 255, .14); color: #fff; position: relative;
+          }
+          .searchbar {
+            margin-top: 14px; display: flex; align-items: center; gap: 10px;
+            background: #fff; color: var(--muted); border-radius: 14px; padding: 0 6px 0 14px; height: 48px;
+            box-shadow: 0 6px 18px rgba(0, 0, 0, .12);
+          }
+          .searchbar .ico svg { width: 20px; height: 20px; }
+          .searchbar span.ph { flex: 1; font-size: 14px; }
+          .searchbar .go {
+            background: var(--amber); color: #fff; font-weight: 700; font-size: 13px;
+            padding: 0 16px; height: 36px; border-radius: 10px; display: grid; place-items: center;
+          }
+
+          .topbar {
+            position: sticky; top: 0; z-index: 20; background: var(--surface);
+            display: flex; align-items: center; gap: 8px; padding: 8px 10px; min-height: 58px;
+            border-bottom: 1px solid var(--border);
+          }
+          .topbar h1 { flex: 1; font-size: 17px; font-weight: 800; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+          .icon-btn {
+            width: 42px; height: 42px; border-radius: 12px; display: grid; place-items: center; flex: none; color: var(--ink);
+          }
+          .icon-btn:active { background: var(--sage); }
+          .topbar .search-input {
+            flex: 1; height: 42px; border-radius: 12px; border: 1.5px solid var(--border); background: var(--cream);
+            padding: 0 14px; outline: none; font-size: 15px;
+          }
+          .topbar .search-input:focus { border-color: var(--green); background: #fff; }
+
+          /* ---------- sections ---------- */
+          .section { padding: 18px 16px 4px; }
+          .section-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 12px; }
+          .section-head h2 { margin: 0; font-size: 17px; font-weight: 800; letter-spacing: -.01em; }
+          .section-head a { color: var(--amber); font-weight: 700; font-size: 13px; }
+          .hscroll {
+            display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory;
+            margin: 0 -16px; padding: 0 16px 6px; scrollbar-width: none;
+          }
+          .hscroll::-webkit-scrollbar { display: none; }
+          .hscroll > * { scroll-snap-align: start; flex: none; }
+
+          /* promo carousel */
+          .promos { margin-top: -2px; padding-top: 16px; }
+          .promo {
+            width: calc(100vw - 48px); max-width: 420px; height: 150px; border-radius: 20px; overflow: hidden;
+            position: relative; color: #fff; padding: 18px; display: flex; flex-direction: column; justify-content: center;
+          }
+          .promo.app { background: radial-gradient(circle at 85% 20%, rgba(217, 119, 6, .55), transparent 55%), linear-gradient(135deg, #2C472F, #38593B 60%, #4a7350); }
+          .promo.cod { background: linear-gradient(135deg, #DFE8D7, #f2f6ee); color: var(--green-dark); }
+          .promo.img { padding: 0; background: var(--sage); }
+          .promo.img img { width: 100%; height: 100%; object-fit: cover; }
+          .promo .chip {
+            align-self: flex-start; background: var(--amber); color: #fff; font-size: 11px; font-weight: 800;
+            padding: 4px 10px; border-radius: 999px; letter-spacing: .04em; text-transform: uppercase;
+          }
+          .promo.cod .chip { background: var(--green); }
+          .promo h3 { margin: 10px 0 4px; font-size: 22px; line-height: 1.1; font-weight: 800; letter-spacing: -.02em; }
+          .promo p { margin: 0; font-size: 12.5px; opacity: .9; max-width: 78%; }
+          .promo .deco { position: absolute; right: -6px; bottom: -10px; width: 96px; opacity: .95; transform: rotate(-8deg); }
+          .dots { display: flex; justify-content: center; gap: 6px; margin-top: 8px; }
+          .dots i { width: 6px; height: 6px; border-radius: 3px; background: var(--border); transition: width .25s, background .25s; }
+          .dots i.on { width: 18px; background: var(--green); }
+
+          /* trust row */
+          .trust { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 16px 16px 0; }
+          .trust div { background: var(--surface); border-radius: 14px; padding: 10px 4px; text-align: center; box-shadow: var(--shadow); }
+          .trust .ico { display: grid; place-items: center; color: var(--green); }
+          .trust small { display: block; font-size: 10.5px; font-weight: 700; margin-top: 4px; color: var(--ink); line-height: 1.2; }
+
+          /* category circles */
+          .cat-circle { width: 74px; text-align: center; }
+          .cat-circle .ph {
+            width: 64px; height: 64px; margin: 0 auto 6px; border-radius: 50%; background: var(--sage);
+            overflow: hidden; display: grid; place-items: center; font-weight: 800; color: var(--green); font-size: 20px;
+            border: 2px solid #fff; box-shadow: var(--shadow);
+          }
+          .cat-circle .ph img { width: 100%; height: 100%; object-fit: cover; }
+          .cat-circle span { font-size: 11.5px; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+
+          /* ---------- product cards ---------- */
+          .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+          .card {
+            background: var(--surface); border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow);
+            display: flex; flex-direction: column; position: relative; transition: transform .15s;
+          }
+          .card:active { transform: scale(.98); }
+          .card .img { aspect-ratio: 1 / 1; background: var(--sage); position: relative; overflow: hidden; }
+          .card .img img { width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity .3s; }
+          .card .img img.loaded { opacity: 1; }
+          .card .off {
+            position: absolute; left: 8px; top: 8px; background: var(--amber); color: #fff; font-size: 11px; font-weight: 800;
+            padding: 3px 7px; border-radius: 8px;
+          }
+          .card .oos { position: absolute; inset: auto 0 0 0; background: rgba(30, 41, 59, .72); color: #fff; font-size: 11px; text-align: center; padding: 4px; font-weight: 700; }
+          .card .wish {
+            position: absolute; right: 8px; top: 8px; width: 32px; height: 32px; border-radius: 50%;
+            background: rgba(255, 255, 255, .92); display: grid; place-items: center; color: var(--muted);
+          }
+          .card .wish svg { width: 17px; height: 17px; }
+          .card .wish.on { color: #e11d48; }
+          .card .body { padding: 9px 10px 11px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
+          .card .name { font-size: 13px; font-weight: 600; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 34px; }
+          .price-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+          .price { color: var(--amber); font-weight: 800; font-size: 15.5px; letter-spacing: -.01em; }
+          .was { color: var(--muted); text-decoration: line-through; font-size: 11.5px; }
+          .meta-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; }
+          .stars { color: #f59e0b; font-size: 11px; font-weight: 700; display: flex; align-items: center; gap: 2px; }
+          .stars span { color: var(--muted); font-weight: 500; }
+          .add-mini {
+            width: 30px; height: 30px; border-radius: 10px; background: var(--green); color: #fff; display: grid; place-items: center; flex: none;
+          }
+          .add-mini svg { width: 16px; height: 16px; }
+          .hcard { width: 142px; }
+          .hcard .name { min-height: 34px; }
+
+          /* skeletons */
+          .skel { background: linear-gradient(90deg, #ece7de 0%, #f7f4ef 50%, #ece7de 100%); background-size: 200% 100%; animation: shimmer 1.2s infinite linear; border-radius: 10px; }
+          @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+          .skel-card { height: 250px; border-radius: var(--radius); }
+
+          /* ---------- category page ---------- */
+          .cat-layout { display: flex; height: calc(100vh - 58px - var(--tabbar-h)); }
+          .cat-rail { width: 96px; flex: none; overflow-y: auto; background: var(--cream); border-right: 1px solid var(--border); }
+          .cat-rail button {
+            display: block; width: 100%; padding: 14px 8px; font-size: 12px; font-weight: 600; text-align: center;
+            color: var(--muted); border-left: 3px solid transparent; line-height: 1.25;
+          }
+          .cat-rail button.on { background: var(--surface); color: var(--green); border-left-color: var(--green); font-weight: 800; }
+          .cat-panel { flex: 1; overflow-y: auto; padding: 12px; }
+          .cat-banner {
+            border-radius: 14px; padding: 14px; background: linear-gradient(135deg, var(--green), var(--green-dark)); color: #fff;
+            display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+          }
+          .cat-banner b { font-size: 15px; }
+          .cat-banner a { background: #fff; color: var(--green); font-weight: 800; font-size: 12px; padding: 6px 12px; border-radius: 999px; }
+          .cat-panel .grid { gap: 8px; }
+          .cat-panel .card .name { font-size: 12px; }
+
+          .chips { display: flex; gap: 8px; overflow-x: auto; padding: 12px 16px 4px; scrollbar-width: none; }
+          .chips::-webkit-scrollbar { display: none; }
+          .chip-btn {
+            flex: none; height: 34px; padding: 0 14px; border-radius: 999px; border: 1.5px solid var(--border);
+            background: var(--surface); font-weight: 700; font-size: 12.5px; color: var(--ink);
+          }
+          .chip-btn.on { background: var(--green); border-color: var(--green); color: #fff; }
+
+          /* ---------- product page ---------- */
+          .pp-top {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 30; display: flex; justify-content: space-between;
+            padding: 10px 12px; pointer-events: none; transition: background .2s, box-shadow .2s;
+          }
+          .pp-top.solid { background: var(--surface); box-shadow: 0 1px 0 var(--border); }
+          .pp-top .group { display: flex; gap: 8px; }
+          .round-btn {
+            pointer-events: auto; width: 40px; height: 40px; border-radius: 50%; background: rgba(255, 255, 255, .94);
+            display: grid; place-items: center; box-shadow: 0 2px 8px rgba(0, 0, 0, .12); color: var(--ink);
+          }
+          .round-btn.on { color: #e11d48; }
+          .gallery { position: relative; background: var(--sage); }
+          .gallery .track { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+          .gallery .track::-webkit-scrollbar { display: none; }
+          .gallery .track img { flex: none; width: 100vw; aspect-ratio: 1 / 1; object-fit: cover; scroll-snap-align: center; }
+          .gallery .count {
+            position: absolute; right: 12px; bottom: 26px; background: rgba(30, 41, 59, .6); color: #fff;
+            font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+          }
+          .pp-card { background: var(--surface); border-radius: 22px 22px 0 0; margin-top: -16px; position: relative; padding: 18px 16px 4px; }
+          .pp-price { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+          .pp-price .price { font-size: 26px; }
+          .pp-price .was { font-size: 14px; }
+          .pp-price .off { background: #fff1e0; color: var(--amber-dark); font-weight: 800; font-size: 12px; padding: 3px 8px; border-radius: 8px; }
+          .pp-title { font-size: 18px; font-weight: 700; margin: 8px 0 6px; line-height: 1.35; letter-spacing: -.01em; }
+          .pp-sub { display: flex; gap: 12px; align-items: center; color: var(--muted); font-size: 12.5px; }
+          .in-stock { color: #15803d; font-weight: 700; }
+          .out-stock { color: #b91c1c; font-weight: 700; }
+          .app-offer {
+            margin: 14px 0 4px; border-radius: 14px; padding: 12px 14px; display: flex; gap: 12px; align-items: center;
+            background: linear-gradient(135deg, #fff7ec, #fdf0dc); border: 1px dashed #f3c27e;
+          }
+          .app-offer .pct {
+            flex: none; width: 48px; height: 48px; border-radius: 12px; background: var(--amber); color: #fff;
+            display: grid; place-items: center; font-weight: 800; font-size: 15px; line-height: 1;
+          }
+          .app-offer b { display: block; font-size: 13.5px; }
+          .app-offer small { color: var(--muted); font-size: 11.5px; display: block; }
+          .block { background: var(--surface); margin-top: 10px; padding: 16px; }
+          .block h3 { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
+          .opt-group { margin-bottom: 12px; }
+          .opt-group label { font-size: 12.5px; color: var(--muted); font-weight: 700; display: block; margin-bottom: 8px; }
+          .opt-group label b { color: var(--ink); }
+          .opts { display: flex; flex-wrap: wrap; gap: 8px; }
+          .opt {
+            min-width: 52px; height: 38px; padding: 0 14px; border-radius: 10px; border: 1.5px solid var(--border);
+            background: var(--cream); font-weight: 700; font-size: 13px;
+          }
+          .opt.on { border-color: var(--green); background: var(--sage); color: var(--green-dark); }
+          .qty { display: inline-flex; align-items: center; border: 1.5px solid var(--border); border-radius: 12px; overflow: hidden; }
+          .qty button { width: 38px; height: 36px; display: grid; place-items: center; color: var(--green); }
+          .qty button:disabled { color: var(--border); }
+          .qty span { min-width: 34px; text-align: center; font-weight: 800; }
+          .qty-row { display: flex; align-items: center; justify-content: space-between; }
+          .perks { display: grid; gap: 12px; }
+          .perk { display: flex; gap: 12px; align-items: center; }
+          .perk .ico { width: 38px; height: 38px; border-radius: 11px; background: var(--sage); color: var(--green); display: grid; place-items: center; flex: none; }
+          .perk .ico svg { width: 19px; height: 19px; }
+          .perk b { display: block; font-size: 13px; }
+          .perk small { color: var(--muted); font-size: 12px; }
+          .desc { color: #334155; font-size: 14px; line-height: 1.65; overflow: hidden; position: relative; }
+          .desc.clamp { max-height: 190px; }
+          .desc.clamp::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 70px; background: linear-gradient(transparent, #fff); }
+          .desc img { border-radius: 10px; height: auto; margin: 8px 0; }
+          .desc p { margin: 0 0 10px; }
+          .desc ul, .desc ol { padding-left: 20px; margin: 0 0 10px; }
+          .link-btn { color: var(--green); font-weight: 800; font-size: 13px; margin-top: 8px; }
+          .pp-bar {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; background: var(--surface); box-shadow: var(--shadow-up);
+            display: flex; gap: 10px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); align-items: center;
+          }
+          .pp-bar .chat { width: 50px; display: grid; place-items: center; color: var(--green); font-size: 10.5px; font-weight: 700; gap: 2px; flex: none; }
+          .btn {
+            height: 50px; border-radius: 14px; font-weight: 800; font-size: 15px; display: grid; place-items: center;
+            transition: transform .12s, background .15s; padding: 0 16px;
+          }
+          .btn:active { transform: scale(.97); }
+          .btn.primary { background: var(--amber); color: #fff; }
+          .btn.primary:active { background: var(--amber-dark); }
+          .btn.secondary { background: var(--sage); color: var(--green-dark); }
+          .btn.green { background: var(--green); color: #fff; }
+          .btn.green:active { background: var(--green-dark); }
+          .btn.block-btn { width: 100%; }
+          .btn:disabled { opacity: .5; }
+          .pp-bar .btn { flex: 1; }
+          .page.pp { padding-bottom: 90px; }
+
+          /* ---------- cart ---------- */
+          .cart-item { background: var(--surface); border-radius: var(--radius); padding: 12px; display: flex; gap: 12px; box-shadow: var(--shadow); margin-bottom: 10px; }
+          .cart-item .thumb { width: 84px; height: 84px; border-radius: 12px; overflow: hidden; background: var(--sage); flex: none; }
+          .cart-item .thumb img { width: 100%; height: 100%; object-fit: cover; }
+          .cart-item .info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+          .cart-item .name { font-weight: 700; font-size: 13.5px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+          .cart-item .var { color: var(--muted); font-size: 12px; }
+          .cart-item .row { display: flex; align-items: center; justify-content: space-between; margin-top: auto; }
+          .cart-item .remove { color: var(--muted); padding: 4px; }
+          .cart-item .qty button { width: 32px; height: 30px; }
+          .summary { background: var(--surface); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); margin-top: 6px; }
+          .summary .line { display: flex; justify-content: space-between; padding: 5px 0; color: #334155; }
+          .summary .line.total { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 12px; font-weight: 800; font-size: 17px; color: var(--ink); }
+          .summary .line.save { color: #15803d; font-weight: 700; }
+          .coupon { display: flex; gap: 8px; margin-top: 12px; }
+          .coupon input { flex: 1; height: 44px; border-radius: 12px; border: 1.5px solid var(--border); padding: 0 12px; background: var(--cream); outline: none; text-transform: uppercase; }
+          .coupon input:focus { border-color: var(--green); }
+          .coupon .btn { height: 44px; font-size: 13px; }
+          .checkout-bar {
+            position: fixed; left: 0; right: 0; bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom)); z-index: 25;
+            background: var(--surface); box-shadow: var(--shadow-up); padding: 10px 14px; display: flex; align-items: center; gap: 12px;
+          }
+          .checkout-bar .t small { display: block; color: var(--muted); font-size: 11.5px; }
+          .checkout-bar .t b { font-size: 18px; color: var(--ink); }
+          .checkout-bar .btn { flex: 1; }
+          .page.cart { padding-bottom: 86px; }
+
+          /* ---------- empty / error ---------- */
+          .empty { text-align: center; padding: 56px 28px; }
+          .empty .art { width: 120px; height: 120px; border-radius: 50%; background: var(--sage); display: grid; place-items: center; margin: 0 auto 18px; }
+          .empty .art img { width: 56px; }
+          .empty h3 { margin: 0 0 6px; font-size: 18px; font-weight: 800; color: var(--green); }
+          .empty p { margin: 0 0 20px; color: var(--muted); }
+          .empty .btn { display: inline-grid; padding: 0 28px; }
+
+          /* ---------- account ---------- */
+          .acc-head { background: linear-gradient(160deg, var(--green), var(--green-dark)); color: #fff; padding: 22px 16px 60px; }
+          .acc-head .who { display: flex; gap: 14px; align-items: center; }
+          .acc-head .avatar { width: 58px; height: 58px; border-radius: 50%; background: var(--cream); display: grid; place-items: center; }
+          .acc-head .avatar img { width: 30px; }
+          .acc-head b { font-size: 18px; font-weight: 800; display: block; }
+          .acc-head small { opacity: .85; }
+          .acc-head .signin { margin-top: 14px; display: inline-grid; height: 40px; padding: 0 18px; border-radius: 12px; background: #fff; color: var(--green); font-weight: 800; place-items: center; }
+          .quick { margin: -40px 16px 0; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); display: grid; grid-template-columns: repeat(4, 1fr); padding: 14px 4px; position: relative; }
+          .quick a { text-align: center; font-size: 11.5px; font-weight: 700; display: grid; gap: 6px; justify-items: center; }
+          .quick .ico { width: 42px; height: 42px; border-radius: 13px; background: var(--sage); color: var(--green); display: grid; place-items: center; }
+          .menu { margin: 14px 16px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+          .menu a { display: flex; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid #f1ece3; font-weight: 600; }
+          .menu a:last-child { border-bottom: 0; }
+          .menu a .ico { color: var(--green); }
+          .menu a span.t { flex: 1; }
+          .menu a .chev { color: var(--border); }
+          .offer-card { margin: 14px 16px; border-radius: var(--radius); padding: 16px; color: #fff; background: radial-gradient(circle at 90% 10%, rgba(217, 119, 6, .6), transparent 50%), linear-gradient(135deg, var(--green-dark), var(--green)); }
+          .offer-card b { font-size: 16px; display: block; margin-bottom: 4px; }
+          .offer-card small { opacity: .9; font-size: 12.5px; }
+          .version { text-align: center; color: var(--muted); font-size: 11.5px; padding: 6px 0 20px; }
+
+          /* ---------- search ---------- */
+          .recent { padding: 16px; }
+          .recent h4 { margin: 0 0 10px; font-size: 14px; font-weight: 800; display: flex; justify-content: space-between; }
+          .recent h4 button { color: var(--muted); font-size: 12px; font-weight: 600; }
+          .tagset { display: flex; flex-wrap: wrap; gap: 8px; }
+          .tag { background: var(--surface); border: 1px solid var(--border); padding: 7px 13px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+          .result-info { padding: 12px 16px 0; color: var(--muted); font-size: 12.5px; }
+          .list-pad { padding: 10px 16px 16px; }
+          .loader-more { text-align: center; padding: 16px; color: var(--muted); font-size: 12.5px; }
+
+          /* ---------- tab bar ---------- */
+          .tabbar {
+            position: fixed; left: 0; right: 0; bottom: 0; z-index: 40; height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+            padding-bottom: env(safe-area-inset-bottom); background: rgba(255, 255, 255, .97); backdrop-filter: blur(10px);
+            border-top: 1px solid var(--border); display: grid; grid-template-columns: repeat(5, 1fr);
+          }
+          .tabbar a { display: grid; justify-items: center; align-content: center; gap: 3px; color: var(--muted); font-size: 10.5px; font-weight: 700; position: relative; }
+          .tabbar a .ico svg { width: 23px; height: 23px; }
+          .tabbar a.on { color: var(--green); }
+          .tabbar a.on .ico { transform: translateY(-1px); }
+          .badge {
+            position: absolute; top: 6px; left: calc(50% + 6px); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+            background: var(--amber); color: #fff; font-size: 10.5px; font-weight: 800; display: grid; place-items: center; border: 2px solid #fff;
+          }
+          .badge.pop { animation: pop .4s; }
+          @keyframes pop { 40% { transform: scale(1.35); } }
+          body.no-tabbar .tabbar { display: none; }
+
+          /* ---------- toast ---------- */
+          .toast {
+            position: fixed; left: 50%; top: calc(66px + env(safe-area-inset-top)); transform: translate(-50%, -16px); opacity: 0;
+            background: var(--ink); color: #fff; padding: 11px 18px; border-radius: 12px; font-weight: 600; font-size: 13px;
+            z-index: 60; transition: opacity .2s, transform .2s; pointer-events: none; max-width: 86vw; text-align: center;
+          }
+          .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+          .error-box { margin: 16px; background: var(--surface); border-radius: var(--radius); padding: 22px; text-align: center; box-shadow: var(--shadow); }
+          .error-box b { color: var(--green); display: block; font-size: 16px; margin-bottom: 6px; }
+          .error-box p { color: var(--muted); margin: 0 0 14px; }
+          .error-box .row { display: flex; gap: 10px; justify-content: center; }
+          END_OF_FILE_10
+          cat > app/src/main/assets/app-shell/app.js <<'END_OF_FILE_11'
+          /* KefirBuy app — screens built on the WooCommerce Store API of kefirbuy.com */
+          (function () {
+            'use strict';
+
+            var API = '/wp-json/wc/store/v1';
+            var WHATSAPP = '923454006500';
+            var APP_EXTRA_PCT = 5;
+            var APP_EXTRA_MAX = 200;
+            var PER_PAGE = 10;
+
+            /* ---------------- icons (simple line icons) ---------------- */
+            var P = {
+              home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/>',
+              grid: '<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+              cart: '<path d="M3 4h2l2.2 11.2a1 1 0 0 0 1 .8h9.4a1 1 0 0 0 1-.76L20.5 8H6"/><circle cx="9" cy="20" r="1.4"/><circle cx="17" cy="20" r="1.4"/>',
+              heart: '<path d="M12 20s-7.5-4.6-9.3-9.2C1.4 7.4 3.6 4 7 4c2 0 3.4 1.1 5 3 1.6-1.9 3-3 5-3 3.4 0 5.6 3.4 4.3 6.8C19.5 15.4 12 20 12 20z"/>',
+              heartFill: '<path fill="currentColor" d="M12 20s-7.5-4.6-9.3-9.2C1.4 7.4 3.6 4 7 4c2 0 3.4 1.1 5 3 1.6-1.9 3-3 5-3 3.4 0 5.6 3.4 4.3 6.8C19.5 15.4 12 20 12 20z"/>',
+              user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.2-4 4.2-6 8-6s6.8 2 8 6"/>',
+              search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+              back: '<path d="M15 5 8 12l7 7"/>',
+              share: '<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="m8.2 10.8 7.6-4.4M8.2 13.2l7.6 4.4"/>',
+              plus: '<path d="M12 5v14M5 12h14"/>',
+              minus: '<path d="M5 12h14"/>',
+              trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+              truck: '<path d="M3 6h11v10H3zM14 9h4l3 3v4h-7"/><circle cx="7" cy="17.5" r="1.8"/><circle cx="17" cy="17.5" r="1.8"/>',
+              shield: '<path d="M12 3 5 6v6c0 4.2 3 7.6 7 9 4-1.4 7-4.8 7-9V6z"/><path d="m9 12 2 2 4-4"/>',
+              leaf: '<path d="M5 19C5 10 11 5 20 4c-1 9-6 15-15 15z"/><path d="M5 19 13 11"/>',
+              cash: '<rect x="2.5" y="6" width="19" height="12" rx="2"/><circle cx="12" cy="12" r="2.6"/><path d="M6 9.5v5M18 9.5v5"/>',
+              chat: '<path d="M4 18.5 5.2 15A8 8 0 1 1 9 18.8z"/><path d="M9 10.5c.4 1.6 1.9 3.1 3.5 3.5l1.2-1 1.8.8"/>',
+              box: '<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z"/><path d="m3 7.5 9 4.5 9-4.5M12 12v9"/>',
+              pin: '<path d="M12 21s7-6.2 7-11.5A7 7 0 0 0 5 9.5C5 14.8 12 21 12 21z"/><circle cx="12" cy="9.5" r="2.5"/>',
+              mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3.5 6 8.5 7 8.5-7"/>',
+              chev: '<path d="m9 5 7 7-7 7"/>',
+              gift: '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v8h14v-8M12 8v12M12 8S10.5 3.5 8 4.5 9 8 12 8zm0 0s1.5-4.5 4-3.5S15 8 12 8z"/>',
+              star: '<path fill="currentColor" stroke="none" d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.8l-5.2 2.8 1-5.8L3.5 9.7l5.9-.9z"/>',
+              refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
+              globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.8 2.5 15.2 0 18M12 3c-2.5 2.8-2.5 15.2 0 18"/>'
+            };
+            function icon(name, size) {
+              var s = size || 22;
+              return '<svg viewBox="0 0 24 24" width="' + s + '" height="' + s + '" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (P[name] || '') + '</svg>';
+            }
+
+            /* ---------------- helpers ---------------- */
+            var $view = document.getElementById('view');
+            var $badge = document.getElementById('cartBadge');
+            var $toast = document.getElementById('toast');
+
+            function esc(s) {
+              return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+              });
+            }
+            var decoder = document.createElement('textarea');
+            function decode(s) { decoder.innerHTML = String(s || ''); return decoder.value; }
+            function text(s) { return esc(decode(String(s || '').replace(/<[^>]*>/g, ''))); }
+            function store(key, val) { try { localStorage.setItem(key, JSON.stringify(val)); } catch (e) { } }
+            function load(key, def) { try { var v = localStorage.getItem(key); return v ? JSON.parse(v) : def; } catch (e) { return def; } }
+            function toast(msg) {
+              $toast.textContent = msg;
+              $toast.classList.add('show');
+              clearTimeout(toast.t);
+              toast.t = setTimeout(function () { $toast.classList.remove('show'); }, 2200);
+            }
+            function el(html) { var d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstChild; }
+            function fillIcons(root) {
+              (root || document).querySelectorAll('[data-icon]').forEach(function (n) {
+                n.innerHTML = icon(n.getAttribute('data-icon'));
+                n.removeAttribute('data-icon');
+              });
+            }
+            function go(hash) { location.hash = hash; }
+            function openSite(path) { location.href = path; }
+            function openWhatsApp(msg) {
+              location.href = 'https://wa.me/' + WHATSAPP + (msg ? '?text=' + encodeURIComponent(msg) : '');
+            }
+
+            /* money: Store API gives prices in minor units */
+            function money(prices, value) {
+              if (!prices) return '';
+              var minor = prices.currency_minor_unit || 0;
+              var n = parseInt(value, 10) / Math.pow(10, minor);
+              if (isNaN(n)) return '';
+              var s = n.toLocaleString('en-PK', { minimumFractionDigits: 0, maximumFractionDigits: minor });
+              var pre = prices.currency_prefix != null ? prices.currency_prefix : 'Rs ';
+              var suf = prices.currency_suffix || '';
+              return decode(pre) + s + decode(suf);
+            }
+            function toNumber(prices, value) {
+              return parseInt(value, 10) / Math.pow(10, (prices && prices.currency_minor_unit) || 0);
+            }
+            function offPct(p) {
+              var pr = p.prices || {};
+              var reg = parseInt(pr.regular_price, 10), sale = parseInt(pr.price, 10);
+              if (p.on_sale && reg > 0 && sale < reg) return Math.round((1 - sale / reg) * 100);
+              return 0;
+            }
+
+            /* ---------------- API ---------------- */
+            var nonce = '';
+            var cache = {};
+            function api(path, opts) {
+              opts = opts || {};
+              var method = opts.method || 'GET';
+              var key = method + path;
+              if (method === 'GET' && opts.cache !== false && cache[key] && Date.now() - cache[key].t < 5 * 60 * 1000) {
+                return Promise.resolve(cache[key].data);
+              }
+              var headers = { 'Accept': 'application/json' };
+              if (method !== 'GET') {
+                headers['Content-Type'] = 'application/json';
+                if (nonce) { headers['Nonce'] = nonce; headers['X-WC-Store-API-Nonce'] = nonce; }
+              }
+              return fetch(API + path, {
+                method: method, headers: headers, credentials: 'same-origin',
+                body: opts.body ? JSON.stringify(opts.body) : undefined
+              }).then(function (res) {
+                var n = res.headers.get('Nonce') || res.headers.get('X-WC-Store-API-Nonce');
+                if (n) nonce = n;
+                return res.json().catch(function () { return null; }).then(function (data) {
+                  if (!res.ok) {
+                    var err = new Error((data && data.message) ? decode(data.message.replace(/<[^>]*>/g, '')) : 'Something went wrong');
+                    err.status = res.status;
+                    throw err;
+                  }
+                  if (method === 'GET' && opts.cache !== false) cache[key] = { t: Date.now(), data: data };
+                  return data;
+                });
+              });
+            }
+
+            /* ---------------- state ---------------- */
+            var cart = null;
+            var cats = null;
+            var wish = load('kb_wish', []);
+            var recent = load('kb_recent', []);
+
+            function refreshCart() {
+              return api('/cart', { cache: false }).then(function (c) { setCart(c); return c; }).catch(function () { return cart; });
+            }
+            function setCart(c) {
+              var before = cart ? cart.items_count : 0;
+              cart = c;
+              var n = c ? c.items_count : 0;
+              $badge.hidden = !n;
+              $badge.textContent = n > 99 ? '99+' : n;
+              if (n > before) { $badge.classList.remove('pop'); void $badge.offsetWidth; $badge.classList.add('pop'); }
+            }
+            function addToCart(id, qty, variation) {
+              var body = { id: id, quantity: qty || 1 };
+              if (variation && variation.length) body.variation = variation;
+              var send = function () { return api('/cart/add-item', { method: 'POST', body: body }); };
+              var p = nonce ? send() : refreshCart().then(send);
+              return p.then(function (c) { setCart(c); return c; });
+            }
+            function getCategories() {
+              if (cats) return Promise.resolve(cats);
+              return api('/products/categories?per_page=100').then(function (list) {
+                cats = (list || []).filter(function (c) { return c.slug !== 'uncategorized' && c.count > 0; });
+                return cats;
+              });
+            }
+            function isWished(id) { return wish.some(function (w) { return w.id === id; }); }
+            function toggleWish(p) {
+              if (isWished(p.id)) {
+                wish = wish.filter(function (w) { return w.id !== p.id; });
+                toast('Removed from wishlist');
+              } else {
+                wish.unshift({ id: p.id, name: p.name, images: (p.images || []).slice(0, 1), prices: p.prices, on_sale: p.on_sale, is_in_stock: p.is_in_stock, average_rating: p.average_rating, review_count: p.review_count, has_options: p.has_options, type: p.type });
+                toast('Saved to wishlist');
+              }
+              store('kb_wish', wish);
+              return isWished(p.id);
+            }
+
+            /* ---------------- shared pieces ---------------- */
+            var productIndex = {};
+            function remember(list) { (list || []).forEach(function (p) { productIndex[p.id] = p; }); return list; }
+
+            function imgSrc(p, big) {
+              var im = (p.images || [])[0];
+              if (!im) return 'icon.png';
+              return big ? im.src : (im.thumbnail || im.src);
+            }
+            function cardHTML(p, cls) {
+              var off = offPct(p);
+              var pr = p.prices || {};
+              var rating = parseFloat(p.average_rating || 0);
+              return '<a class="card ' + (cls || '') + '" href="#/p/' + p.id + '" data-pid="' + p.id + '">' +
+                '<div class="img"><img loading="lazy" alt="" src="' + esc(imgSrc(p)) + '" onload="this.classList.add(\'loaded\')" onerror="this.src=\'icon.png\';this.classList.add(\'loaded\')">' +
+                (off ? '<span class="off">-' + off + '%</span>' : '') +
+                '<button class="wish ' + (isWished(p.id) ? 'on' : '') + '" data-wish="' + p.id + '" aria-label="Wishlist">' + icon(isWished(p.id) ? 'heartFill' : 'heart') + '</button>' +
+                (p.is_in_stock === false ? '<span class="oos">Out of stock</span>' : '') + '</div>' +
+                '<div class="body"><div class="name">' + text(p.name) + '</div>' +
+                '<div class="price-row"><span class="price">' + esc(money(pr, pr.price)) + '</span>' +
+                (off ? '<span class="was">' + esc(money(pr, pr.regular_price)) + '</span>' : '') + '</div>' +
+                '<div class="meta-row">' +
+                (rating > 0 ? '<span class="stars">' + icon('star', 12) + rating.toFixed(1) + ' <span>(' + (p.review_count || 0) + ')</span></span>' : '<span></span>') +
+                (p.is_in_stock !== false ? '<button class="add-mini" data-add="' + p.id + '" aria-label="Add to cart">' + icon('plus') + '</button>' : '') +
+                '</div></div></a>';
+            }
+            function skeletonGrid(n) {
+              var s = '';
+              for (var i = 0; i < (n || 4); i++) s += '<div class="skel skel-card"></div>';
+              return '<div class="grid">' + s + '</div>';
+            }
+            function errorBox(msg, retry) {
+              var box = el('<div class="error-box"><b>Couldn\'t load the shop</b><p>' + esc(msg || 'Please check your internet connection.') + '</p>' +
+                '<div class="row"><button class="btn green" data-r>Try again</button><button class="btn secondary" data-w>Open website</button></div></div>');
+              box.querySelector('[data-r]').onclick = retry;
+              box.querySelector('[data-w]').onclick = function () { openSite('/'); };
+              return box;
+            }
+
+            /* card clicks: wishlist heart and quick add */
+            document.addEventListener('click', function (e) {
+              var w = e.target.closest('[data-wish]');
+              if (w) {
+                e.preventDefault(); e.stopPropagation();
+                var p = productIndex[w.getAttribute('data-wish')] || wish.filter(function (x) { return String(x.id) === w.getAttribute('data-wish'); })[0];
+                if (!p) return;
+                var on = toggleWish(p);
+                w.classList.toggle('on', on);
+                w.innerHTML = icon(on ? 'heartFill' : 'heart');
+                if (current.name === 'wishlist') render();
+                return;
+              }
+              var a = e.target.closest('[data-add]');
+              if (a) {
+                e.preventDefault(); e.stopPropagation();
+                var prod = productIndex[a.getAttribute('data-add')];
+                if (prod && (prod.has_options || prod.type === 'variable')) { go('#/p/' + prod.id); return; }
+                a.disabled = true;
+                addToCart(parseInt(a.getAttribute('data-add'), 10), 1).then(function () {
+                  toast('Added to cart');
+                }).catch(function (err) { toast(err.message); }).then(function () { a.disabled = false; });
+              }
+            });
+
+            /* infinite list */
+            function infiniteGrid(container, query) {
+              var page = 1, done = false, busy = false;
+              var grid = el('<div class="grid"></div>');
+              var more = el('<div class="loader-more"></div>');
+              container.appendChild(grid);
+              container.appendChild(more);
+              function next() {
+                if (busy || done) return;
+                busy = true;
+                more.textContent = 'Loading…';
+                if (page === 1) grid.innerHTML = skeletonGrid(4).replace('<div class="grid">', '').replace(/<\/div>$/, '');
+                api('/products?per_page=' + PER_PAGE + '&page=' + page + (query ? '&' + query : '')).then(function (list) {
+                  if (page === 1) grid.innerHTML = '';
+                  remember(list);
+                  list.forEach(function (p) { grid.insertAdjacentHTML('beforeend', cardHTML(p)); });
+                  if (list.length < PER_PAGE) done = true;
+                  page++;
+                  more.textContent = done ? (grid.children.length ? 'You\'ve seen it all' : '') : '';
+                  if (!grid.children.length) {
+                    container.replaceChild(el('<div class="empty"><div class="art"><img src="icon.png" alt=""></div><h3>Nothing here yet</h3><p>Try another category or search.</p></div>'), grid);
+                  }
+                }).catch(function (err) {
+                  more.textContent = '';
+                  if (page === 1) { grid.innerHTML = ''; container.appendChild(errorBox(err.message, function () { location.reload(); })); done = true; }
+                }).then(function () { busy = false; });
+              }
+              var io = new IntersectionObserver(function (entries) { if (entries[0].isIntersecting) next(); }, { rootMargin: '600px' });
+              io.observe(more);
+              next();
+              return { observer: io };
+            }
+
+            /* ---------------- views ---------------- */
+            var views = {};
+            var keep = {};          // cached pages (home, lists) for instant back navigation
+            var scrollPos = {};
+            var current = { name: '', hash: '' };
+            var lastHash = '';
+            var historyDepth = [];
+
+            views.home = function () {
+              var page = el('<div class="page home"></div>');
+              page.innerHTML =
+                '<header class="home-head"><div class="brand-row">' +
+                '<div class="brand-mark"><img src="icon.png" alt=""></div>' +
+                '<div class="brand-text"><b>KefirBuy</b><small>Live cultures, delivered fresh</small></div>' +
+                '<button class="head-btn" data-chat aria-label="WhatsApp">' + icon('chat') + '</button></div>' +
+                '<a class="searchbar" href="#/search">' + icon('search') + '<span class="ph">Search kefir, kombucha, kits…</span><span class="go">Search</span></a>' +
+                '</header>' +
+                '<div class="section promos"><div class="hscroll" id="promoTrack">' +
+                '<div class="promo app"><span class="chip">App exclusive</span><h3>Extra 5% OFF<br>in the app</h3><p>Pay in advance & save 10% in total. First app order, up to Rs ' + APP_EXTRA_MAX + ' extra.</p><img class="deco" src="icon.png" alt=""></div>' +
+                '<div class="promo img"><img src="https://kefirbuy.com/wp-content/uploads/2026/10/Main-Banner-Kefir-Buy-1-1024x576.webp" alt="KefirBuy"></div>' +
+                '<div class="promo cod"><span class="chip">Nationwide</span><h3>Cash on Delivery<br>all over Pakistan</h3><p>Fresh live grains & probiotic drinks at your door.</p><img class="deco" src="icon.png" alt=""></div>' +
+                '</div><div class="dots" id="promoDots"><i class="on"></i><i></i><i></i></div></div>' +
+                '<div class="trust">' +
+                '<div><span class="ico">' + icon('leaf') + '</span><small>Live &amp; fresh</small></div>' +
+                '<div><span class="ico">' + icon('cash') + '</span><small>Cash on delivery</small></div>' +
+                '<div><span class="ico">' + icon('truck') + '</span><small>Fast delivery</small></div>' +
+                '<div><span class="ico">' + icon('chat') + '</span><small>WhatsApp help</small></div></div>' +
+                '<div class="section" id="catSec"><div class="section-head"><h2>Shop by category</h2><a href="#/categories">See all</a></div><div class="hscroll" id="catRow">' +
+                '<div class="skel" style="width:64px;height:84px"></div><div class="skel" style="width:64px;height:84px"></div><div class="skel" style="width:64px;height:84px"></div><div class="skel" style="width:64px;height:84px"></div></div></div>' +
+                '<div class="section" id="dealSec" hidden><div class="section-head"><h2>🔥 Hot deals</h2><a href="#/list/sale">See all</a></div><div class="hscroll" id="dealRow"></div></div>' +
+                '<div class="section" id="bestSec"><div class="section-head"><h2>Best sellers</h2><a href="#/list/popular">See all</a></div><div class="hscroll" id="bestRow">' +
+                '<div class="skel" style="width:142px;height:230px"></div><div class="skel" style="width:142px;height:230px"></div><div class="skel" style="width:142px;height:230px"></div></div></div>' +
+                '<div class="section"><div class="section-head"><h2>Just for you</h2></div><div id="feed"></div></div>';
+
+              page.querySelector('[data-chat]').onclick = function () { openWhatsApp('Assalam o Alaikum KefirBuy, I need help with an order.'); };
+
+              // promo carousel dots + auto slide
+              var track = page.querySelector('#promoTrack');
+              var dots = page.querySelectorAll('#promoDots i');
+              var idx = 0;
+              track.addEventListener('scroll', function () {
+                var w = track.firstChild.getBoundingClientRect().width + 12;
+                idx = Math.round(track.scrollLeft / w);
+                dots.forEach(function (d, i) { d.classList.toggle('on', i === idx); });
+              }, { passive: true });
+              clearInterval(views.home.timer);
+              views.home.timer = setInterval(function () {
+                if (!document.body.contains(track) || current.name !== 'home') return;
+                var w = track.firstChild.getBoundingClientRect().width + 12;
+                idx = (idx + 1) % dots.length;
+                track.scrollTo({ left: idx * w, behavior: 'smooth' });
+              }, 4500);
+
+              getCategories().then(function (list) {
+                var row = page.querySelector('#catRow');
+                row.innerHTML = '';
+                list.filter(function (c) { return !c.parent; }).slice(0, 14).forEach(function (c) {
+                  row.insertAdjacentHTML('beforeend', '<a class="cat-circle" href="#/c/' + c.id + '"><div class="ph">' +
+                    (c.image && c.image.src ? '<img loading="lazy" src="' + esc(c.image.thumbnail || c.image.src) + '" alt="">' : esc(decode(c.name).charAt(0))) +
+                    '</div><span>' + text(c.name) + '</span></a>');
+                });
+              }).catch(function () { page.querySelector('#catSec').hidden = true; });
+
+              api('/products?on_sale=true&per_page=10').then(function (list) {
+                if (!list.length) return;
+                remember(list);
+                page.querySelector('#dealSec').hidden = false;
+                page.querySelector('#dealRow').innerHTML = list.map(function (p) { return cardHTML(p, 'hcard'); }).join('');
+              }).catch(function () { });
+
+              api('/products?orderby=popularity&order=desc&per_page=10').then(function (list) {
+                remember(list);
+                page.querySelector('#bestRow').innerHTML = list.map(function (p) { return cardHTML(p, 'hcard'); }).join('');
+              }).catch(function () { page.querySelector('#bestSec').hidden = true; });
+
+              infiniteGrid(page.querySelector('#feed'), 'orderby=date&order=desc');
+              return page;
+            };
+            views.home.keep = true;
+
+            views.categories = function () {
+              var page = el('<div class="page"><div class="topbar"><h1>Categories</h1><a class="icon-btn" href="#/search">' + icon('search') + '</a></div>' +
+                '<div class="cat-layout"><div class="cat-rail"></div><div class="cat-panel">' + skeletonGrid(4) + '</div></div></div>');
+              var rail = page.querySelector('.cat-rail');
+              var panel = page.querySelector('.cat-panel');
+              function show(c) {
+                rail.querySelectorAll('button').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-id') === String(c.id)); });
+                panel.innerHTML = '<div class="cat-banner"><b>' + text(c.name) + '</b><a href="#/c/' + c.id + '">View all</a></div>';
+                var subs = (cats || []).filter(function (s) { return s.parent === c.id; });
+                if (subs.length) {
+                  var chips = el('<div class="tagset" style="margin-bottom:12px"></div>');
+                  subs.forEach(function (s) { chips.insertAdjacentHTML('beforeend', '<a class="tag" href="#/c/' + s.id + '">' + text(s.name) + '</a>'); });
+                  panel.appendChild(chips);
+                }
+                var holder = el('<div></div>');
+                panel.appendChild(holder);
+                panel.scrollTop = 0;
+                infiniteGrid(holder, 'category=' + c.id);
+                store('kb_lastcat', c.id);
+              }
+              getCategories().then(function (list) {
+                var top = list.filter(function (c) { return !c.parent; });
+                if (!top.length) top = list;
+                top.forEach(function (c) {
+                  var b = el('<button data-id="' + c.id + '">' + text(c.name) + '</button>');
+                  b.onclick = function () { show(c); };
+                  rail.appendChild(b);
+                });
+                var last = load('kb_lastcat', null);
+                show(top.filter(function (c) { return c.id === last; })[0] || top[0]);
+              }).catch(function (err) { panel.innerHTML = ''; panel.appendChild(errorBox(err.message, function () { render(); })); });
+              return page;
+            };
+
+            var SORTS = [
+              ['Popular', 'orderby=popularity&order=desc'],
+              ['Newest', 'orderby=date&order=desc'],
+              ['Price: low to high', 'orderby=price&order=asc'],
+              ['Price: high to low', 'orderby=price&order=desc'],
+              ['Top rated', 'orderby=rating&order=desc']
+            ];
+            function listPage(title, baseQuery) {
+              var page = el('<div class="page"><div class="topbar"><button class="icon-btn" data-back>' + icon('back') + '</button><h1>' + esc(title) + '</h1><a class="icon-btn" href="#/search">' + icon('search') + '</a></div><div class="chips"></div><div class="list-pad"></div></div>');
+              var chips = page.querySelector('.chips');
+              var pad = page.querySelector('.list-pad');
+              var active = 0;
+              function run() {
+                pad.innerHTML = '';
+                infiniteGrid(pad, (baseQuery ? baseQuery + '&' : '') + SORTS[active][1]);
+              }
+              SORTS.forEach(function (s, i) {
+                var b = el('<button class="chip-btn ' + (i === 0 ? 'on' : '') + '">' + s[0] + '</button>');
+                b.onclick = function () { active = i; chips.querySelectorAll('.chip-btn').forEach(function (x, j) { x.classList.toggle('on', j === i); }); run(); };
+                chips.appendChild(b);
+              });
+              run();
+              return page;
+            }
+            views.category = function (id) {
+              var c = (cats || []).filter(function (x) { return String(x.id) === String(id); })[0];
+              var page = listPage(c ? decode(c.name) : 'Products', 'category=' + encodeURIComponent(id));
+              if (!c) getCategories().then(function (list) {
+                var f = list.filter(function (x) { return String(x.id) === String(id); })[0];
+                if (f) page.querySelector('h1').textContent = decode(f.name);
+              }).catch(function () { });
+              return page;
+            };
+            views.category.keep = true;
+            views.list = function (kind) {
+              if (kind === 'sale') return listPage('Hot deals', 'on_sale=true');
+              return listPage('Best sellers', '');
+            };
+            views.list.keep = true;
+
+            views.search = function (q) {
+              q = q || '';
+              var page = el('<div class="page"><div class="topbar"><button class="icon-btn" data-back>' + icon('back') + '</button>' +
+                '<form style="flex:1;display:flex"><input class="search-input" type="search" enterkeyhint="search" placeholder="Search products" value="' + esc(q) + '"></form></div><div class="body"></div></div>');
+              var input = page.querySelector('input');
+              var body = page.querySelector('.body');
+              page.querySelector('form').onsubmit = function (e) {
+                e.preventDefault();
+                var v = input.value.trim();
+                if (!v) return;
+                recent = [v].concat(recent.filter(function (r) { return r.toLowerCase() !== v.toLowerCase(); })).slice(0, 8);
+                store('kb_recent', recent);
+                input.blur();
+                history.replaceState(null, '', '#/search/' + encodeURIComponent(v));
+                current.hash = location.hash;
+                results(v);
+              };
+              function results(v) {
+                body.innerHTML = '<div class="result-info">Results for “' + esc(v) + '”</div><div class="list-pad"></div>';
+                infiniteGrid(body.querySelector('.list-pad'), 'search=' + encodeURIComponent(v));
+              }
+              function suggestions() {
+                var html = '';
+                if (recent.length) {
+                  html += '<div class="recent"><h4>Recent searches <button data-clear>Clear</button></h4><div class="tagset">' +
+                    recent.map(function (r) { return '<a class="tag" href="#/search/' + encodeURIComponent(r) + '">' + esc(r) + '</a>'; }).join('') + '</div></div>';
+                }
+                html += '<div class="recent"><h4>Popular</h4><div class="tagset">' +
+                  ['Milk kefir grains', 'Water kefir', 'Kombucha', 'SCOBY', 'Greek yogurt', 'Starter kit', 'Kimchi'].map(function (r) {
+                    return '<a class="tag" href="#/search/' + encodeURIComponent(r) + '">' + r + '</a>';
+                  }).join('') + '</div></div>';
+                body.innerHTML = html;
+                var clr = body.querySelector('[data-clear]');
+                if (clr) clr.onclick = function () { recent = []; store('kb_recent', recent); suggestions(); };
+              }
+              if (q) results(q); else { suggestions(); setTimeout(function () { input.focus(); }, 280); }
+              return page;
+            };
+
+            views.product = function (id) {
+              var page = el('<div class="page pp"><div class="pp-top"><button class="round-btn" data-back>' + icon('back') + '</button>' +
+                '<div class="group"><button class="round-btn" data-share>' + icon('share') + '</button><button class="round-btn" data-wishp>' + icon('heart') + '</button><a class="round-btn" href="#/cart">' + icon('cart') + '</a></div></div>' +
+                '<div class="gallery"><div class="skel" style="width:100vw;aspect-ratio:1/1;border-radius:0"></div></div>' +
+                '<div class="pp-card"><div class="skel" style="height:30px;width:50%"></div><div class="skel" style="height:22px;margin-top:12px"></div><div class="skel" style="height:22px;width:70%;margin-top:8px"></div></div></div>');
+              var top = page.querySelector('.pp-top');
+              var onScroll = function () { top.classList.toggle('solid', window.scrollY > window.innerWidth - 80); };
+              window.addEventListener('scroll', onScroll, { passive: true });
+              page._cleanup = function () { window.removeEventListener('scroll', onScroll); };
+
+              var cached = productIndex[id];
+              var p0 = api('/products/' + encodeURIComponent(id));
+              p0.then(function (p) { build(p); }).catch(function (err) {
+                if (cached) { build(cached); return; }
+                page.querySelector('.gallery').innerHTML = '';
+                page.querySelector('.pp-card').innerHTML = '';
+                page.querySelector('.pp-card').appendChild(errorBox(err.message, function () { render(); }));
+              });
+
+              function build(p) {
+                productIndex[p.id] = p;
+                var selected = {};
+                var qty = 1;
+                var variationId = null;
+                var varPrices = null;
+                var attrs = (p.attributes || []).filter(function (a) { return a.has_variations; });
+                var needsChoice = p.type === 'variable' && attrs.length > 0;
+
+                // gallery
+                var imgs = (p.images || []).length ? p.images : [{ src: 'icon.png' }];
+                var gal = page.querySelector('.gallery');
+                gal.innerHTML = '<div class="track">' + imgs.map(function (im, i) {
+                  return '<img ' + (i ? 'loading="lazy" ' : '') + 'src="' + esc(im.src) + '"' + (im.srcset ? ' srcset="' + esc(im.srcset) + '" sizes="100vw"' : '') + ' alt="">';
+                }).join('') + '</div>' + (imgs.length > 1 ? '<span class="count">1/' + imgs.length + '</span>' : '');
+                var trackEl = gal.querySelector('.track');
+                var countEl = gal.querySelector('.count');
+                if (countEl) trackEl.addEventListener('scroll', function () {
+                  countEl.textContent = (Math.round(trackEl.scrollLeft / trackEl.clientWidth) + 1) + '/' + imgs.length;
+                }, { passive: true });
+
+                var card = page.querySelector('.pp-card');
+                var rating = parseFloat(p.average_rating || 0);
+                card.innerHTML =
+                  '<div class="pp-price" id="ppPrice"></div>' +
+                  '<h1 class="pp-title">' + text(p.name) + '</h1>' +
+                  '<div class="pp-sub">' + (rating > 0 ? '<span class="stars">' + icon('star', 13) + rating.toFixed(1) + ' <span>(' + (p.review_count || 0) + ' reviews)</span></span>' : '') +
+                  (p.is_in_stock === false ? '<span class="out-stock">Out of stock</span>' : '<span class="in-stock">In stock</span>') + '</div>' +
+                  '<div class="app-offer"><div class="pct">10%</div><div><b>Save up to 10% in the app</b><small>5% for advance payment + extra 5% app discount on your first app order (up to Rs ' + APP_EXTRA_MAX + '). Applied at checkout.</small></div></div>';
+
+                function renderPrice() {
+                  var pr = varPrices || p.prices || {};
+                  var html;
+                  if (needsChoice && !variationId && pr.price_range) {
+                    html = '<span class="price">' + esc(money(pr, pr.price_range.min_amount)) + (pr.price_range.max_amount !== pr.price_range.min_amount ? ' – ' + esc(money(pr, pr.price_range.max_amount)) : '') + '</span>';
+                  } else {
+                    var reg = parseInt(pr.regular_price, 10), cur = parseInt(pr.price, 10);
+                    var off = reg > cur ? Math.round((1 - cur / reg) * 100) : 0;
+                    html = '<span class="price">' + esc(money(pr, pr.price)) + '</span>' + (off ? '<span class="was">' + esc(money(pr, pr.regular_price)) + '</span><span class="off">-' + off + '%</span>' : '');
+                  }
+                  card.querySelector('#ppPrice').innerHTML = html;
+                }
+                renderPrice();
+
+                // options + quantity
+                var optBlock = el('<div class="block"></div>');
+                if (needsChoice) {
+                  attrs.forEach(function (a) {
+                    var g = el('<div class="opt-group"><label>' + text(a.name) + ': <b data-sel></b></label><div class="opts"></div></div>');
+                    (a.terms || []).forEach(function (t) {
+                      var b = el('<button class="opt">' + text(t.name) + '</button>');
+                      b.onclick = function () {
+                        selected[a.name] = t;
+                        g.querySelectorAll('.opt').forEach(function (x) { x.classList.remove('on'); });
+                        b.classList.add('on');
+                        g.querySelector('[data-sel]').textContent = decode(t.name);
+                        matchVariation();
+                      };
+                      g.querySelector('.opts').appendChild(b);
+                    });
+                    optBlock.appendChild(g);
+                  });
+                }
+                var qtyRow = el('<div class="qty-row"><b>Quantity</b><div class="qty"><button data-m aria-label="Less">' + icon('minus', 18) + '</button><span>1</span><button data-p aria-label="More">' + icon('plus', 18) + '</button></div></div>');
+                var maxQ = (p.add_to_cart && p.add_to_cart.maximum) || 99;
+                function setQty(n) {
+                  qty = Math.max(1, Math.min(maxQ, n));
+                  qtyRow.querySelector('span').textContent = qty;
+                  qtyRow.querySelector('[data-m]').disabled = qty <= 1;
+                }
+                qtyRow.querySelector('[data-m]').onclick = function () { setQty(qty - 1); };
+                qtyRow.querySelector('[data-p]').onclick = function () { setQty(qty + 1); };
+                setQty(1);
+                optBlock.appendChild(qtyRow);
+                page.appendChild(optBlock);
+
+                function attrKey(name) { return String(name || '').toLowerCase().replace(/^pa_/, '').replace(/^attribute_/, ''); }
+                function matchVariation() {
+                  variationId = null; varPrices = null;
+                  if (Object.keys(selected).length < attrs.length) { renderPrice(); return; }
+                  var found = (p.variations || []).filter(function (v) {
+                    return (v.attributes || []).every(function (va) {
+                      var chosen = null;
+                      attrs.forEach(function (a) {
+                        if (selected[a.name] && (attrKey(a.name) === attrKey(va.name) || (a.taxonomy && attrKey(a.taxonomy) === attrKey(va.name)))) chosen = selected[a.name];
+                      });
+                      if (!chosen) return true;
+                      return !va.value || va.value === chosen.slug || decode(va.value).toLowerCase() === decode(chosen.name).toLowerCase();
+                    });
+                  })[0];
+                  if (found) {
+                    variationId = found.id;
+                    api('/products/' + found.id).then(function (v) {
+                      if (variationId !== found.id) return;
+                      varPrices = v.prices;
+                      renderPrice();
+                      if (v.images && v.images.length && v.images[0].src) {
+                        var first = trackEl.querySelector('img');
+                        if (first) { first.removeAttribute('srcset'); first.src = v.images[0].src; trackEl.scrollTo({ left: 0, behavior: 'smooth' }); }
+                      }
+                    }).catch(function () { renderPrice(); });
+                  } else {
+                    toast('This combination is not available');
+                    renderPrice();
+                  }
+                }
+
+                // perks
+                page.appendChild(el('<div class="block"><div class="perks">' +
+                  '<div class="perk"><span class="ico">' + icon('truck') + '</span><div><b>Delivery all over Pakistan</b><small>Packed fresh and shipped fast</small></div></div>' +
+                  '<div class="perk"><span class="ico">' + icon('cash') + '</span><div><b>Cash on delivery available</b><small>Or pay in advance with JazzCash, EasyPaisa or bank transfer and save more</small></div></div>' +
+                  '<div class="perk"><span class="ico">' + icon('shield') + '</span><div><b>Live culture guarantee</b><small>Questions? Our team is on WhatsApp</small></div></div>' +
+                  '</div></div>'));
+
+                // description
+                var raw = p.description || p.short_description || '';
+                if (raw.replace(/<[^>]*>/g, '').trim()) {
+                  var d = el('<div class="block"><h3>Product details</h3><div class="desc"></div></div>');
+                  var doc = new DOMParser().parseFromString(raw, 'text/html');
+                  doc.querySelectorAll('script,style,iframe,object,embed,form').forEach(function (n) { n.remove(); });
+                  doc.querySelectorAll('*').forEach(function (n) {
+                    Array.prototype.slice.call(n.attributes).forEach(function (at) {
+                      if (/^on/i.test(at.name) || (/^(href|src)$/i.test(at.name) && /^\s*javascript:/i.test(at.value))) n.removeAttribute(at.name);
+                    });
+                    if (n.tagName === 'IMG') { n.setAttribute('loading', 'lazy'); n.removeAttribute('width'); n.removeAttribute('height'); }
+                  });
+                  var descEl = d.querySelector('.desc');
+                  descEl.innerHTML = doc.body.innerHTML;
+                  page.appendChild(d);
+                  requestAnimationFrame(function () {
+                    if (descEl.scrollHeight > 220) {
+                      descEl.classList.add('clamp');
+                      var more = el('<button class="link-btn">Show more</button>');
+                      more.onclick = function () { descEl.classList.toggle('clamp'); more.textContent = descEl.classList.contains('clamp') ? 'Show more' : 'Show less'; };
+                      d.appendChild(more);
+                    }
+                  });
+                }
+
+                // related
+                var catId = p.categories && p.categories[0] && p.categories[0].id;
+                if (catId) {
+                  var rel = el('<div class="block"><h3>You may also like</h3><div class="grid"></div></div>');
+                  page.appendChild(rel);
+                  api('/products?category=' + catId + '&per_page=7').then(function (list) {
+                    list = remember(list).filter(function (x) { return x.id !== p.id; }).slice(0, 6);
+                    if (!list.length) { rel.remove(); return; }
+                    rel.querySelector('.grid').innerHTML = list.map(function (x) { return cardHTML(x); }).join('');
+                  }).catch(function () { rel.remove(); });
+                }
+
+                // top buttons
+                var wb = page.querySelector('[data-wishp]');
+                function paintWish() { var on = isWished(p.id); wb.classList.toggle('on', on); wb.innerHTML = icon(on ? 'heartFill' : 'heart'); }
+                paintWish();
+                wb.onclick = function () { toggleWish(p); paintWish(); };
+                page.querySelector('[data-share]').onclick = function () {
+                  var url = p.permalink || ('https://kefirbuy.com/?p=' + p.id);
+                  if (navigator.share) navigator.share({ title: decode(p.name), url: url }).catch(function () { });
+                  else openWhatsApp(decode(p.name) + ' ' + url);
+                };
+
+                // bottom bar
+                var bar = el('<div class="pp-bar"><button class="chat">' + icon('chat') + 'Chat</button><button class="btn secondary" data-addc>Add to cart</button><button class="btn primary" data-buy>Buy now</button></div>');
+                page.appendChild(bar);
+                bar.querySelector('.chat').onclick = function () { openWhatsApp('Assalam o Alaikum, I have a question about: ' + decode(p.name)); };
+                function doAdd(then) {
+                  if (p.is_in_stock === false) { toast('Sorry, this item is out of stock'); return; }
+                  if (needsChoice && !variationId) {
+                    toast('Please choose ' + attrs.filter(function (a) { return !selected[a.name]; }).map(function (a) { return decode(a.name); }).join(' & '));
+                    optBlock.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    return;
+                  }
+                  var variation = needsChoice ? attrs.map(function (a) {
+                    var t = selected[a.name];
+                    return a.taxonomy ? { attribute: a.taxonomy, value: t.slug } : { attribute: decode(a.name), value: decode(t.name) };
+                  }) : null;
+                  var buttons = bar.querySelectorAll('.btn');
+                  buttons.forEach(function (b) { b.disabled = true; });
+                  addToCart(needsChoice ? variationId : p.id, qty, variation).then(function () {
+                    then();
+                  }).catch(function (err) { toast(err.message); }).then(function () { buttons.forEach(function (b) { b.disabled = false; }); });
+                }
+                bar.querySelector('[data-addc]').onclick = function () { doAdd(function () { toast('Added to cart'); }); };
+                bar.querySelector('[data-buy]').onclick = function () { doAdd(function () { openSite('/checkout/'); }); };
+              }
+              return page;
+            };
+
+            views.cart = function () {
+              var page = el('<div class="page cart"><div class="topbar"><h1>My cart</h1></div><div class="list-pad">' +
+                '<div class="skel" style="height:108px;margin-bottom:10px"></div><div class="skel" style="height:108px"></div></div></div>');
+              var pad = page.querySelector('.list-pad');
+              function draw(c) {
+                setCart(c);
+                pad.innerHTML = '';
+                var old = page.querySelector('.checkout-bar');
+                if (old) old.remove();
+                if (!c || !c.items || !c.items.length) {
+                  pad.innerHTML = '<div class="empty"><div class="art"><img src="icon.png" alt=""></div><h3>Your cart is empty</h3><p>Fresh kefir grains and probiotic goodies are waiting for you.</p><a class="btn primary" href="#/">Start shopping</a></div>';
+                  page.querySelector('h1').textContent = 'My cart';
+                  return;
+                }
+                page.querySelector('h1').textContent = 'My cart (' + c.items_count + ')';
+                var t = c.totals || {};
+                c.items.forEach(function (it) {
+                  var pr = it.prices || {};
+                  var tot = it.totals || {};
+                  var vars = (it.variation || []).map(function (v) { return decode(v.attribute) + ': ' + decode(v.value); }).join(' · ');
+                  var row = el('<div class="cart-item"><a class="thumb" href="#/p/' + it.id + '"><img src="' + esc(imgSrc(it)) + '" alt=""></a><div class="info">' +
+                    '<a class="name" href="#/p/' + it.id + '">' + text(it.name) + '</a>' + (vars ? '<div class="var">' + esc(vars) + '</div>' : '') +
+                    '<span class="price">' + esc(money(tot.currency_code ? tot : t, tot.line_total != null ? (parseInt(tot.line_total, 10) + parseInt(tot.line_total_tax || 0, 10)) : pr.price)) + '</span>' +
+                    '<div class="row"><div class="qty"><button data-m>' + icon('minus', 16) + '</button><span>' + it.quantity + '</span><button data-p>' + icon('plus', 16) + '</button></div>' +
+                    '<button class="remove" aria-label="Remove">' + icon('trash', 20) + '</button></div></div></div>');
+                  var lock = function (on) { row.querySelectorAll('button').forEach(function (b) { b.disabled = on; }); row.style.opacity = on ? .6 : 1; };
+                  var update = function (q) {
+                    lock(true);
+                    var path = q > 0 ? '/cart/update-item' : '/cart/remove-item';
+                    var body = q > 0 ? { key: it.key, quantity: q } : { key: it.key };
+                    (nonce ? Promise.resolve() : refreshCart()).then(function () {
+                      return api(path, { method: 'POST', body: body });
+                    }).then(draw).catch(function (err) { toast(err.message); lock(false); });
+                  };
+                  row.querySelector('[data-m]').onclick = function () { update(it.quantity - 1); };
+                  row.querySelector('[data-p]').onclick = function () { update(it.quantity + 1); };
+                  row.querySelector('.remove').onclick = function () { update(0); };
+                  pad.appendChild(row);
+                });
+
+                var cur = t;
+                var subtotal = parseInt(t.total_items, 10) + parseInt(t.total_items_tax || 0, 10);
+                var discount = parseInt(t.total_discount, 10) + parseInt(t.total_discount_tax || 0, 10);
+                var shipping = t.total_shipping != null ? parseInt(t.total_shipping, 10) + parseInt(t.total_shipping_tax || 0, 10) : null;
+                var fees = parseInt(t.total_fees || 0, 10) + parseInt(t.total_fees_tax || 0, 10);
+                var appSave = Math.min(toNumber(cur, subtotal) * APP_EXTRA_PCT / 100, APP_EXTRA_MAX);
+
+                var sum = el('<div class="summary">' +
+                  '<div class="line"><span>Subtotal</span><span>' + esc(money(cur, subtotal)) + '</span></div>' +
+                  (discount > 0 ? '<div class="line save"><span>Coupon discount</span><span>−' + esc(money(cur, discount)) + '</span></div>' : '') +
+                  (fees ? '<div class="line"><span>Fees &amp; discounts</span><span>' + esc(money(cur, fees)) + '</span></div>' : '') +
+                  '<div class="line"><span>Shipping</span><span>' + (shipping ? esc(money(cur, shipping)) : 'At checkout') + '</span></div>' +
+                  '<div class="line total"><span>Total</span><span>' + esc(money(cur, t.total_price)) + '</span></div>' +
+                  '<form class="coupon"><input placeholder="Coupon code" autocapitalize="characters"><button class="btn green">Apply</button></form>' +
+                  ((c.coupons || []).length ? '<div class="tagset" style="margin-top:10px">' + c.coupons.map(function (cp) { return '<button class="tag" data-coupon="' + esc(cp.code) + '">' + esc(cp.code.toUpperCase()) + ' ✕</button>'; }).join('') + '</div>' : '') +
+                  '</div>');
+                pad.appendChild(sum);
+                pad.appendChild(el('<div class="app-offer"><div class="pct">10%</div><div><b>Pay in advance, save up to 10%</b><small>Choose JazzCash, EasyPaisa or bank transfer at checkout: 5% advance discount + extra 5% app discount (first app order, max Rs ' + APP_EXTRA_MAX + '). You could save about ' + esc(money({ currency_minor_unit: 0, currency_prefix: cur.currency_prefix, currency_suffix: cur.currency_suffix }, Math.round(toNumber(cur, subtotal) * 0.05 + appSave))) + '.</small></div></div>'));
+
+                sum.querySelector('form').onsubmit = function (e) {
+                  e.preventDefault();
+                  var code = sum.querySelector('input').value.trim();
+                  if (!code) return;
+                  api('/cart/apply-coupon', { method: 'POST', body: { code: code } }).then(function (nc) { toast('Coupon applied'); draw(nc); }).catch(function (err) { toast(err.message); });
+                };
+                sum.querySelectorAll('[data-coupon]').forEach(function (b) {
+                  b.onclick = function () {
+                    api('/cart/remove-coupon', { method: 'POST', body: { code: b.getAttribute('data-coupon') } }).then(draw).catch(function (err) { toast(err.message); });
+                  };
+                });
+
+                var bar = el('<div class="checkout-bar"><div class="t"><small>Total</small><b>' + esc(money(cur, t.total_price)) + '</b></div><button class="btn primary">Checkout</button></div>');
+                bar.querySelector('button').onclick = function () { openSite('/checkout/'); };
+                page.appendChild(bar);
+              }
+              refreshCart().then(function (c) {
+                if (c) draw(c);
+                else { pad.innerHTML = ''; pad.appendChild(errorBox('', function () { render(); })); }
+              });
+              return page;
+            };
+
+            views.wishlist = function () {
+              var page = el('<div class="page"><div class="topbar"><h1>Wishlist</h1></div><div class="list-pad"></div></div>');
+              var pad = page.querySelector('.list-pad');
+              if (!wish.length) {
+                pad.innerHTML = '<div class="empty"><div class="art">' + icon('heart', 48) + '</div><h3>No favourites yet</h3><p>Tap the heart on any product to save it here.</p><a class="btn primary" href="#/">Explore products</a></div>';
+                pad.querySelector('.art').style.color = 'var(--green)';
+              } else {
+                remember(wish.filter(function (w) { return !productIndex[w.id]; }));
+                pad.innerHTML = '<div class="grid">' + wish.map(function (p) { return cardHTML(productIndex[p.id] || p); }).join('') + '</div>';
+              }
+              return page;
+            };
+
+            views.account = function () {
+              var page = el('<div class="page">' +
+                '<div class="acc-head"><div class="who"><div class="avatar"><img src="icon.png" alt=""></div><div><b>Welcome to KefirBuy</b><small>Sign in to track orders and save addresses</small></div></div>' +
+                '<a class="signin" href="/my-account/">Sign in / Register</a></div>' +
+                '<div class="quick">' +
+                '<a href="/my-account/orders/"><span class="ico">' + icon('box') + '</span>My orders</a>' +
+                '<a href="/track-order/"><span class="ico">' + icon('truck') + '</span>Track order</a>' +
+                '<a href="/my-account/edit-address/"><span class="ico">' + icon('pin') + '</span>Addresses</a>' +
+                '<a href="#/wishlist"><span class="ico">' + icon('heart') + '</span>Wishlist</a></div>' +
+                '<div class="offer-card"><b>🎁 App exclusive: up to 10% OFF</b><small>Pay in advance on your first app order and get an extra 5% off (up to Rs ' + APP_EXTRA_MAX + ') on top of the 5% advance payment discount.</small></div>' +
+                '<div class="menu">' +
+                '<a href="/my-account/edit-account/"><span class="ico">' + icon('user') + '</span><span class="t">Account details</span><span class="chev">' + icon('chev', 18) + '</span></a>' +
+                '<a href="#" data-wa><span class="ico">' + icon('chat') + '</span><span class="t">Chat on WhatsApp</span><span class="chev">' + icon('chev', 18) + '</span></a>' +
+                '<a href="/contact/"><span class="ico">' + icon('mail') + '</span><span class="t">Contact us</span><span class="chev">' + icon('chev', 18) + '</span></a>' +
+                '<a href="/"><span class="ico">' + icon('globe') + '</span><span class="t">Open full website</span><span class="chev">' + icon('chev', 18) + '</span></a>' +
+                '</div><div class="version">KefirBuy app · version 2.0</div></div>');
+              page.querySelector('[data-wa]').onclick = function (e) { e.preventDefault(); openWhatsApp('Assalam o Alaikum KefirBuy!'); };
+              return page;
+            };
+
+            /* ---------------- router ---------------- */
+            var TABS = { home: 'home', categories: 'categories', cart: 'cart', wishlist: 'wishlist', account: 'account' };
+            function parse(hash) {
+              var parts = (hash || '').replace(/^#\/?/, '').split('/').map(function (s) { try { return decodeURIComponent(s); } catch (e) { return s; } });
+              var name = parts[0] || 'home';
+              switch (name) {
+                case 'categories': return { name: 'categories', arg: null };
+                case 'c': return { name: 'category', arg: parts[1] };
+                case 'list': return { name: 'list', arg: parts[1] };
+                case 'p': return { name: 'product', arg: parts[1] };
+                case 'search': return { name: 'search', arg: parts.slice(1).join('/') };
+                case 'cart': return { name: 'cart', arg: null };
+                case 'wishlist': return { name: 'wishlist', arg: null };
+                case 'account': return { name: 'account', arg: null };
+                default: return { name: 'home', arg: null };
+              }
+            }
+
+            function render() {
+              var hash = location.hash || '#/';
+              var r = parse(hash);
+              var goingBack = historyDepth.length > 1 && historyDepth[historyDepth.length - 2] === hash;
+              if (goingBack) historyDepth.pop(); else if (historyDepth[historyDepth.length - 1] !== hash) historyDepth.push(hash);
+
+              // remember where we were
+              if (current.hash) scrollPos[current.hash] = window.scrollY;
+              var old = $view.firstChild;
+              if (old) {
+                if (old._cleanup) old._cleanup();
+                if (current.keep) keep[current.hash] = old;
+                $view.removeChild(old);
+              }
+
+              var page;
+              var reused = false;
+              if (keep[hash]) { page = keep[hash]; reused = true; }
+              else page = views[r.name](r.arg);
+              page.classList.remove('back');
+              if (goingBack) page.classList.add('back');
+              if (reused) { page.style.animation = 'none'; void page.offsetWidth; page.style.animation = ''; }
+
+              $view.appendChild(page);
+              fillIcons(page);
+              page.querySelectorAll('[data-back]').forEach(function (b) {
+                b.onclick = function () { if (historyDepth.length > 1) history.back(); else go('#/'); };
+              });
+
+              current = { name: r.name, hash: hash, keep: !!views[r.name].keep };
+              var tab = TABS[r.name] || (r.name === 'category' || r.name === 'list' ? 'categories' : null);
+              document.body.classList.toggle('no-tabbar', r.name === 'product' || r.name === 'search');
+              document.querySelectorAll('#tabbar a').forEach(function (a) { a.classList.toggle('on', a.getAttribute('data-tab') === tab); });
+              window.scrollTo(0, reused || goingBack ? (scrollPos[hash] || 0) : 0);
+              lastHash = hash;
+              // keep at most a few cached pages
+              var keys = Object.keys(keep);
+              if (keys.length > 6) keys.filter(function (k) { return k !== '#/' && k !== hash; }).slice(0, keys.length - 6).forEach(function (k) { delete keep[k]; });
+            }
+
+            window.addEventListener('hashchange', render);
+            // coming back from checkout / website pages: refresh the cart
+            window.addEventListener('pageshow', function (e) { if (e.persisted) { refreshCart(); if (current.name === 'cart') render(); } });
+            document.addEventListener('visibilitychange', function () { if (!document.hidden) refreshCart(); });
+
+            fillIcons(document);
+            refreshCart();
+            render();
+          })();
+          END_OF_FILE_11
+          cat > make_icons.py <<'END_OF_FILE_12'
           import base64
           import os
 
@@ -648,12 +2086,18 @@ jobs:
               os.makedirs(drawables, exist_ok=True)
               logo.save(os.path.join(drawables, "splash_logo.png"))
               jar.save(os.path.join(drawables, "offline_jar.png"))
+
+              shell = os.path.join("app", "src", "main", "assets", "app-shell")
+              os.makedirs(shell, exist_ok=True)
+              small = jar.copy()
+              small.thumbnail((192, 192), Image.LANCZOS)
+              small.save(os.path.join(shell, "icon.png"))
               print("Icons, splash logo and offline image created")
 
 
           if __name__ == "__main__":
               main()
-          END_OF_FILE_9
+          END_OF_FILE_12
           cat > icon_src.png.b64 <<'END_OF_IMAGE'
           iVBORw0KGgoAAAANSUhEUgAAAVoAAAIACAMAAAD0clRIAAAAwFBMVEWQYx8UVBfKzMM7RSSan5Ng
           alq7gS5FUTwjLReDkH5/f3/D0L4AW1sSPh0A/wBfXwDIgB5QNgh/AH9/kHv/AP8yRi3Z5NT9+vUA
