@@ -433,7 +433,7 @@ jobs:
                               return true;
                           }
                       }
-                      // Payment pages (JazzCash, EasyPaisa, banks) stay inside the app
+                      // Payment pages stay inside the app
                       return false;
                   }
 
@@ -1176,8 +1176,8 @@ jobs:
 
             var API = '/wp-json/wc/store/v1';
             var WHATSAPP = '923454006500';
-            var APP_EXTRA_PCT = 5;
-            var APP_EXTRA_MAX = 200;
+            var APP_EXTRA_PCT = 0;
+            var APP_EXTRA_MAX = 0;
             var PER_PAGE = 10;
 
             /* ---------------- icons (simple line icons) ---------------- */
@@ -1460,7 +1460,7 @@ jobs:
                 '<a class="searchbar" href="#/search">' + icon('search') + '<span class="ph">Search kefir, kombucha, kits…</span><span class="go">Search</span></a>' +
                 '</header>' +
                 '<div class="section promos"><div class="hscroll" id="promoTrack">' +
-                '<div class="promo app"><span class="chip">App exclusive</span><h3>Extra 5% OFF<br>in the app</h3><p>Pay in advance & save 10% in total. First app order, up to Rs ' + APP_EXTRA_MAX + ' extra.</p><img class="deco" src="icon.png" alt=""></div>' +
+                '<div class="promo app"><span class="chip">Shop KefirBuy</span><h3>Fresh favourites<br>for your routine</h3><p>Explore products, check current prices and order directly from our store.</p><img class="deco" src="icon.png" alt=""></div>' +
                 '<div class="promo img"><img src="https://kefirbuy.com/wp-content/uploads/2026/10/Main-Banner-Kefir-Buy-1-1024x576.webp" alt="KefirBuy"></div>' +
                 '<div class="promo cod"><span class="chip">Nationwide</span><h3>Cash on Delivery<br>all over Pakistan</h3><p>Fresh live grains & probiotic drinks at your door.</p><img class="deco" src="icon.png" alt=""></div>' +
                 '</div><div class="dots" id="promoDots"><i class="on"></i><i></i><i></i></div></div>' +
@@ -1682,7 +1682,7 @@ jobs:
                   '<h1 class="pp-title">' + text(p.name) + '</h1>' +
                   '<div class="pp-sub">' + (rating > 0 ? '<span class="stars">' + icon('star', 13) + rating.toFixed(1) + ' <span>(' + (p.review_count || 0) + ' reviews)</span></span>' : '') +
                   (p.is_in_stock === false ? '<span class="out-stock">Out of stock</span>' : '<span class="in-stock">In stock</span>') + '</div>' +
-                  '<div class="app-offer"><div class="pct">10%</div><div><b>Save up to 10% in the app</b><small>5% for advance payment + extra 5% app discount on your first app order (up to Rs ' + APP_EXTRA_MAX + '). Applied at checkout.</small></div></div>';
+                  '<div class="app-offer"><div class="pct">✓</div><div><b>Order directly from KefirBuy</b><small>Current product prices and availability come from our store.</small></div></div>';
 
                 function renderPrice() {
                   var pr = varPrices || p.prices || {};
@@ -1764,7 +1764,7 @@ jobs:
                 // perks
                 page.appendChild(el('<div class="block"><div class="perks">' +
                   '<div class="perk"><span class="ico">' + icon('truck') + '</span><div><b>Delivery all over Pakistan</b><small>Packed fresh and shipped fast</small></div></div>' +
-                  '<div class="perk"><span class="ico">' + icon('cash') + '</span><div><b>Cash on delivery available</b><small>Or pay in advance with JazzCash, EasyPaisa or bank transfer and save more</small></div></div>' +
+                  '<div class="perk"><span class="ico">' + icon('cash') + '</span><div><b>Cash on delivery available</b><small>Choose from the payment methods available at checkout</small></div></div>' +
                   '<div class="perk"><span class="ico">' + icon('shield') + '</span><div><b>Live culture guarantee</b><small>Questions? Our team is on WhatsApp</small></div></div>' +
                   '</div></div>'));
 
@@ -1900,7 +1900,7 @@ jobs:
                   ((c.coupons || []).length ? '<div class="tagset" style="margin-top:10px">' + c.coupons.map(function (cp) { return '<button class="tag" data-coupon="' + esc(cp.code) + '">' + esc(cp.code.toUpperCase()) + ' ✕</button>'; }).join('') + '</div>' : '') +
                   '</div>');
                 pad.appendChild(sum);
-                pad.appendChild(el('<div class="app-offer"><div class="pct">10%</div><div><b>Pay in advance, save up to 10%</b><small>Choose JazzCash, EasyPaisa or bank transfer at checkout: 5% advance discount + extra 5% app discount (first app order, max Rs ' + APP_EXTRA_MAX + '). You could save about ' + esc(money({ currency_minor_unit: 0, currency_prefix: cur.currency_prefix, currency_suffix: cur.currency_suffix }, Math.round(toNumber(cur, subtotal) * 0.05 + appSave))) + '.</small></div></div>'));
+                pad.appendChild(el('<div class="app-offer"><div class="pct">✓</div><div><b>Choose your payment method</b><small>Continue to checkout to see the payment options available for your order.</small></div></div>'));
 
                 sum.querySelector('form').onsubmit = function (e) {
                   e.preventDefault();
@@ -1947,7 +1947,7 @@ jobs:
                 '<a href="/track-order/"><span class="ico">' + icon('truck') + '</span>Track order</a>' +
                 '<a href="/my-account/edit-address/"><span class="ico">' + icon('pin') + '</span>Addresses</a>' +
                 '<a href="#/wishlist"><span class="ico">' + icon('heart') + '</span>Wishlist</a></div>' +
-                '<div class="offer-card"><b>🎁 App exclusive: up to 10% OFF</b><small>Pay in advance on your first app order and get an extra 5% off (up to Rs ' + APP_EXTRA_MAX + ') on top of the 5% advance payment discount.</small></div>' +
+                '<div class="offer-card"><b>Shop with confidence</b><small>Product prices and available payment options are shown by KefirBuy at checkout.</small></div>' +
                 '<div class="menu">' +
                 '<a href="/my-account/edit-account/"><span class="ico">' + icon('user') + '</span><span class="t">Account details</span><span class="chev">' + icon('chev', 18) + '</span></a>' +
                 '<a href="#" data-wa><span class="ico">' + icon('chat') + '</span><span class="t">Chat on WhatsApp</span><span class="chev">' + icon('chev', 18) + '</span></a>' +
