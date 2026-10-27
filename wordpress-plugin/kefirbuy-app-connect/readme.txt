@@ -1,7 +1,7 @@
 === KefirBuy App Connect ===
 Requires at least: 6.2
 Requires PHP: 7.4
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 
 Lets the KefirBuy Android app sign customers in and show their orders, addresses and profile inside the app.
 
@@ -16,6 +16,9 @@ REST API under /wp-json/kefirbuy-app/v1/ :
 ping, config, reviews, login, register, password/lost, logout, me, me/password, me/address, me/delete, orders, orders/{id}, track.
 
 == Changelog ==
+= 1.2.0 =
+* Paying the full amount in advance by bank transfer gets the same discount as JazzCash / EasyPaisa (5% up to Rs 150; can be switched off under WooCommerce → KefirBuy App). Works on the website checkout and in the app.
+* The app shows your bank account (from Direct bank transfer settings) and Raast QR at checkout and after the order.
 = 1.1.0 =
 * WooCommerce → KefirBuy App settings page: delivery prices, COD advance, wallet discount, fresh cut-off hour, JazzCash/EasyPaisa details.
 * config endpoint so the app always shows the store's current numbers and payment details.

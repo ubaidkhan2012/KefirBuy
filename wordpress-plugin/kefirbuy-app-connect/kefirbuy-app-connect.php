@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       KefirBuy App Connect
  * Description:       Lets the KefirBuy Android app sign customers in and show their orders, addresses and profile inside the app. Adds a small, secure REST API under /wp-json/kefirbuy-app/v1/.
- * Version:           1.1.0
+ * Version:           1.2.0
  * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            KefirBuy
@@ -22,7 +22,7 @@
 defined( 'ABSPATH' ) || exit;
 
 final class KB_App_Connect {
-	const VERSION   = '1.1.0';
+	const VERSION   = '1.2.0';
 	const NS        = 'kefirbuy-app/v1';
 	const META      = '_kb_app_tokens';
 	const TTL       = 7776000; // 90 days
@@ -32,6 +32,7 @@ final class KB_App_Connect {
 		add_action( 'rest_api_init', array( __CLASS__, 'routes' ) );
 		add_filter( 'determine_current_user', array( __CLASS__, 'auth_from_header' ), 20 );
 		add_action( 'admin_menu', array( __CLASS__, 'admin_menu' ), 60 );
+		add_action( 'woocommerce_cart_calculate_fees', array( __CLASS__, 'bank_transfer_discount' ), 99 );
 		add_action( 'before_woocommerce_init', function () {
 			if ( class_exists( '\Automattic\WooCommerce\Utilities\FeaturesUtil' ) ) {
 				\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
@@ -207,6 +208,8 @@ final class KB_App_Connect {
 			'wallet_cap'  => 150,
 			'cutoff_hour' => 14,
 			'wallet_info' => '',
+			'bacs_discount' => 1,
+			'raast_qr'    => '',
 		);
 		$saved = get_option( 'kb_app_settings', array() );
 		return array_merge( $defaults, is_array( $saved ) ? $saved : array() );
@@ -236,8 +239,8 @@ final class KB_App_Connect {
 				if ( 'bacs' === $id ) {
 					foreach ( (array) get_option( 'woocommerce_bacs_accounts', array() ) as $a ) {
 						$fields = array(
-							'Account title' => isset( $a['account_name'] ) ? $a['account_name'] : '',
 							'Bank'          => isset( $a['bank_name'] ) ? $a['bank_name'] : '',
+							'Account title' => isset( $a['account_name'] ) ? $a['account_name'] : '',
 							'Account number' => isset( $a['account_number'] ) ? $a['account_number'] : '',
 							'IBAN'          => isset( $a['iban'] ) ? $a['iban'] : '',
 						);
@@ -248,6 +251,12 @@ final class KB_App_Connect {
 					}
 				}
 				$payments[] = $row;
+			}
+		}
+		$bank = array();
+		foreach ( $payments as $pm ) {
+			if ( 'bacs' === $pm['id'] ) {
+				$bank = $pm['accounts'];
 			}
 		}
 		$res = rest_ensure_response( array(
@@ -262,6 +271,9 @@ final class KB_App_Connect {
 			'wallet_cap'  => (float) $s['wallet_cap'],
 			'cutoff_hour' => (int) $s['cutoff_hour'],
 			'wallet_info' => self::clean_text( $s['wallet_info'] ),
+			'bacs_discount' => (bool) $s['bacs_discount'],
+			'raast_qr'    => esc_url_raw( $s['raast_qr'] ),
+			'bank'        => $bank,
 			'payments'    => $payments,
 			'reviews'     => array(
 				'enabled'       => 'yes' === get_option( 'woocommerce_enable_reviews', 'yes' ),
@@ -334,6 +346,42 @@ final class KB_App_Connect {
 		return array( 'ok' => true, 'approved' => 1 === (int) $approved, 'verified' => (bool) $verified );
 	}
 
+	/* ---------------------------------------------- bank transfer discount */
+
+	/** The payment method being calculated: Store API request (app / block checkout), classic checkout, or session. */
+	private static function chosen_payment_method() {
+		if ( defined( 'REST_REQUEST' ) && REST_REQUEST ) {
+			$body = json_decode( (string) file_get_contents( 'php://input' ), true );
+			if ( is_array( $body ) && ! empty( $body['payment_method'] ) ) {
+				return sanitize_key( $body['payment_method'] );
+			}
+		}
+		if ( ! empty( $_POST['payment_method'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification
+			return sanitize_key( wp_unslash( $_POST['payment_method'] ) ); // phpcs:ignore WordPress.Security.NonceVerification
+		}
+		return ( function_exists( 'WC' ) && WC()->session ) ? (string) WC()->session->get( 'chosen_payment_method' ) : '';
+	}
+
+	/**
+	 * Paying the full amount in advance by bank transfer gets the same discount as JazzCash / EasyPaisa
+	 * ("Paid in advance: discount", 5% up to Rs 150 by default). Skipped if the store already added one.
+	 */
+	public static function bank_transfer_discount( $cart ) {
+		$s = self::settings();
+		if ( empty( $s['bacs_discount'] ) || ! $cart || ( is_admin() && ! wp_doing_ajax() ) || 'bacs' !== self::chosen_payment_method() ) {
+			return;
+		}
+		foreach ( $cart->get_fees() as $fee ) {
+			if ( $fee->amount < 0 && false !== stripos( $fee->name, 'advance' ) ) {
+				return;
+			}
+		}
+		$off = min( round( (float) $cart->get_subtotal() * (float) $s['wallet_pct'] / 100 ), (float) $s['wallet_cap'] );
+		if ( $off > 0 ) {
+			$cart->add_fee( __( 'Paid in advance: discount', 'kefirbuy-app-connect' ), -$off, false );
+		}
+	}
+
 	/* ------------------------------------------------------------ admin page */
 
 	public static function admin_menu() {
@@ -361,6 +409,8 @@ final class KB_App_Connect {
 			}
 			$new['cutoff_hour'] = min( 23, (int) $new['cutoff_hour'] );
 			$new['wallet_info'] = isset( $_POST['wallet_info'] ) ? sanitize_textarea_field( wp_unslash( $_POST['wallet_info'] ) ) : '';
+			$new['bacs_discount'] = empty( $_POST['bacs_discount'] ) ? 0 : 1;
+			$new['raast_qr'] = isset( $_POST['raast_qr'] ) ? esc_url_raw( wp_unslash( $_POST['raast_qr'] ) ) : '';
 			update_option( 'kb_app_settings', $new, false );
 			echo '<div class="notice notice-success"><p>Saved. The app picks up the new values within 10 minutes.</p></div>';
 		}
@@ -372,6 +422,8 @@ final class KB_App_Connect {
 			printf( '<tr><th><label for="%1$s">%2$s</label></th><td><input type="number" step="any" min="0" id="%1$s" name="%1$s" value="%3$s" class="small-text"></td></tr>', esc_attr( $k ), esc_html( $label ), esc_attr( $s[ $k ] ) );
 		}
 		printf( '<tr><th><label for="wallet_info">JazzCash / EasyPaisa details shown after an order</label></th><td><textarea id="wallet_info" name="wallet_info" rows="4" class="large-text" placeholder="JazzCash: 03xx xxxxxxx (Account title)&#10;EasyPaisa: 03xx xxxxxxx (Account title)">%s</textarea><p class="description">Bank transfer details come from WooCommerce → Settings → Payments → Direct bank transfer.</p></td></tr>', esc_textarea( $s['wallet_info'] ) );
+		printf( '<tr><th>Bank transfer discount</th><td><label><input type="checkbox" name="bacs_discount" value="1" %s> Give the same advance-payment discount when customers pay the full amount by bank transfer</label></td></tr>', checked( ! empty( $s['bacs_discount'] ), true, false ) );
+		printf( '<tr><th><label for="raast_qr">Raast QR image URL</label></th><td><input type="url" id="raast_qr" name="raast_qr" value="%s" class="large-text" placeholder="https://kefirbuy.com/wp-content/uploads/…"><p class="description">Optional. The app already shows your current Raast QR; set this if you change it.</p></td></tr>', esc_attr( $s['raast_qr'] ) );
 		echo '</table><p><button class="button button-primary" name="kb_app_save" value="1">Save</button></p></form></div>';
 	}
 
