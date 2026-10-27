@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       KefirBuy App Connect
  * Description:       Lets the KefirBuy Android app sign customers in and show their orders, addresses and profile inside the app. Adds a small, secure REST API under /wp-json/kefirbuy-app/v1/.
- * Version:           1.0.0
+ * Version:           1.1.0
  * Requires at least: 6.2
  * Requires PHP:      7.4
  * Author:            KefirBuy
@@ -15,13 +15,14 @@
  *   after 90 days, and it is sent by the app in the "X-KB-Token" header.
  * - With that header, WordPress treats the request as the signed-in customer, so orders placed through
  *   the WooCommerce Store API from the app are attached to the customer's account.
- * - Login and order-tracking attempts are rate limited per IP address.
+ * - Login, order-tracking and review attempts are rate limited per IP address.
+ * - WooCommerce → KefirBuy App sets the delivery prices, advance and JazzCash/EasyPaisa details shown in the app.
  */
 
 defined( 'ABSPATH' ) || exit;
 
 final class KB_App_Connect {
-	const VERSION   = '1.0.0';
+	const VERSION   = '1.1.0';
 	const NS        = 'kefirbuy-app/v1';
 	const META      = '_kb_app_tokens';
 	const TTL       = 7776000; // 90 days
@@ -30,6 +31,7 @@ final class KB_App_Connect {
 	public static function init() {
 		add_action( 'rest_api_init', array( __CLASS__, 'routes' ) );
 		add_filter( 'determine_current_user', array( __CLASS__, 'auth_from_header' ), 20 );
+		add_action( 'admin_menu', array( __CLASS__, 'admin_menu' ), 60 );
 		add_action( 'before_woocommerce_init', function () {
 			if ( class_exists( '\Automattic\WooCommerce\Utilities\FeaturesUtil' ) ) {
 				\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
@@ -181,6 +183,196 @@ final class KB_App_Connect {
 		$r( '/me/delete', 'POST', 'delete_request', $authed );
 		$r( '/orders', 'GET', 'orders', $authed );
 		$r( '/orders/(?P<id>\d+)', 'GET', 'order', $authed );
+		$r( '/config', 'GET', 'config', $public );
+		$r( '/reviews', 'POST', 'add_review', $public, array(
+			'product_id' => array( 'required' => true, 'type' => 'integer' ),
+			'rating'     => array( 'required' => true, 'type' => 'integer', 'minimum' => 1, 'maximum' => 5 ),
+			'review'     => array( 'required' => true, 'type' => 'string' ),
+			'name'       => array( 'type' => 'string' ),
+			'email'      => array( 'type' => 'string' ),
+		) );
+	}
+
+	/* ------------------------------------------------------- store settings */
+
+	/** Defaults match the store's current rules; change them under WooCommerce → KefirBuy App. */
+	private static function settings() {
+		$defaults = array(
+			'peshawar'    => 250,
+			'rider'       => 450,
+			'courier'     => 299,
+			'free_over'   => 5000,
+			'advance'     => 500,
+			'wallet_pct'  => 5,
+			'wallet_cap'  => 150,
+			'cutoff_hour' => 14,
+			'wallet_info' => '',
+		);
+		$saved = get_option( 'kb_app_settings', array() );
+		return array_merge( $defaults, is_array( $saved ) ? $saved : array() );
+	}
+
+	private static function clean_text( $html ) {
+		$t = wp_strip_all_tags( str_replace( array( '<br>', '<br/>', '<br />', '</p>' ), "\n", (string) $html ) );
+		return trim( preg_replace( "/\n{3,}/", "\n\n", html_entity_decode( $t, ENT_QUOTES, 'UTF-8' ) ) );
+	}
+
+	/** Delivery prices, the COD advance and payment details, so the app never shows outdated numbers. */
+	public static function config() {
+		$s        = self::settings();
+		$payments = array();
+		if ( function_exists( 'WC' ) && WC()->payment_gateways() ) {
+			foreach ( WC()->payment_gateways()->payment_gateways() as $id => $g ) {
+				if ( 'yes' !== $g->enabled ) {
+					continue;
+				}
+				$row = array(
+					'id'           => $id,
+					'title'        => self::clean_text( $g->get_title() ),
+					'description'  => self::clean_text( $g->get_description() ),
+					'instructions' => isset( $g->instructions ) ? self::clean_text( $g->instructions ) : '',
+					'accounts'     => array(),
+				);
+				if ( 'bacs' === $id ) {
+					foreach ( (array) get_option( 'woocommerce_bacs_accounts', array() ) as $a ) {
+						$fields = array(
+							'Account title' => isset( $a['account_name'] ) ? $a['account_name'] : '',
+							'Bank'          => isset( $a['bank_name'] ) ? $a['bank_name'] : '',
+							'Account number' => isset( $a['account_number'] ) ? $a['account_number'] : '',
+							'IBAN'          => isset( $a['iban'] ) ? $a['iban'] : '',
+						);
+						$fields = array_filter( array_map( 'sanitize_text_field', $fields ) );
+						if ( $fields ) {
+							$row['accounts'][] = $fields;
+						}
+					}
+				}
+				$payments[] = $row;
+			}
+		}
+		$res = rest_ensure_response( array(
+			'delivery' => array(
+				'peshawar'  => (float) $s['peshawar'],
+				'rider'     => (float) $s['rider'],
+				'courier'   => (float) $s['courier'],
+				'free_over' => (float) $s['free_over'],
+			),
+			'advance'     => (float) $s['advance'],
+			'wallet_pct'  => (float) $s['wallet_pct'],
+			'wallet_cap'  => (float) $s['wallet_cap'],
+			'cutoff_hour' => (int) $s['cutoff_hour'],
+			'wallet_info' => self::clean_text( $s['wallet_info'] ),
+			'payments'    => $payments,
+			'reviews'     => array(
+				'enabled'       => 'yes' === get_option( 'woocommerce_enable_reviews', 'yes' ),
+				'verified_only' => 'yes' === get_option( 'woocommerce_review_rating_verification_required', 'no' ),
+			),
+		) );
+		$res->header( 'Cache-Control', 'public, max-age=600' );
+		return $res;
+	}
+
+	/* ---------------------------------------------------------------- reviews */
+
+	public static function add_review( WP_REST_Request $req ) {
+		$limit = self::limited( 'review', 6, HOUR_IN_SECONDS );
+		if ( $limit ) {
+			return $limit;
+		}
+		$pid     = (int) $req['product_id'];
+		$product = wc_get_product( $pid );
+		if ( ! $product || 'publish' !== get_post_status( $pid ) || ! comments_open( $pid ) || 'yes' !== get_option( 'woocommerce_enable_reviews', 'yes' ) ) {
+			return new WP_Error( 'kb_reviews_closed', __( 'Reviews are closed for this product.', 'kefirbuy-app-connect' ), array( 'status' => 400 ) );
+		}
+		$uid  = get_current_user_id();
+		$user = $uid ? get_userdata( $uid ) : null;
+		$name  = $user ? ( $user->display_name ? $user->display_name : $user->user_login ) : sanitize_text_field( (string) $req['name'] );
+		$email = $user ? $user->user_email : sanitize_email( (string) $req['email'] );
+		$text  = trim( sanitize_textarea_field( (string) $req['review'] ) );
+		if ( '' === $name || ! is_email( $email ) ) {
+			return new WP_Error( 'kb_bad_input', __( 'Please enter your name and a valid email.', 'kefirbuy-app-connect' ), array( 'status' => 400 ) );
+		}
+		if ( mb_strlen( $text ) < 5 || mb_strlen( $text ) > 3000 ) {
+			return new WP_Error( 'kb_bad_input', __( 'Please write a review between 5 and 3,000 characters.', 'kefirbuy-app-connect' ), array( 'status' => 400 ) );
+		}
+		$verified = function_exists( 'wc_customer_bought_product' ) && wc_customer_bought_product( $email, $uid, $pid );
+		if ( ! $verified && 'yes' === get_option( 'woocommerce_review_rating_verification_required', 'no' ) ) {
+			return new WP_Error( 'kb_not_verified', __( 'Only customers who bought this product can review it.', 'kefirbuy-app-connect' ), array( 'status' => 403 ) );
+		}
+		$data = array(
+			'comment_post_ID'      => $pid,
+			'comment_author'       => $name,
+			'comment_author_email' => $email,
+			'comment_author_url'   => '',
+			'comment_content'      => $text,
+			'comment_type'         => 'review',
+			'comment_parent'       => 0,
+			'user_id'              => $uid,
+			'comment_author_IP'    => self::ip(),
+			'comment_agent'        => 'KefirBuy App',
+		);
+		$approved = wp_allow_comment( $data, true );
+		if ( is_wp_error( $approved ) ) {
+			return new WP_Error( 'kb_review_rejected', $approved->get_error_message(), array( 'status' => 400 ) );
+		}
+		if ( 'spam' === $approved || 'trash' === $approved ) {
+			return new WP_Error( 'kb_review_rejected', __( 'Your review could not be posted.', 'kefirbuy-app-connect' ), array( 'status' => 400 ) );
+		}
+		$data['comment_approved'] = $approved;
+		$id = wp_insert_comment( wp_slash( $data ) );
+		if ( ! $id ) {
+			return new WP_Error( 'kb_review_failed', __( 'Your review could not be saved. Please try again.', 'kefirbuy-app-connect' ), array( 'status' => 500 ) );
+		}
+		add_comment_meta( $id, 'rating', (int) $req['rating'], true );
+		add_comment_meta( $id, 'verified', $verified ? 1 : 0, true );
+		if ( class_exists( 'WC_Comments' ) ) {
+			WC_Comments::clear_transients( $pid );
+		}
+		if ( 1 !== (int) $approved ) {
+			wp_notify_moderator( $id );
+		}
+		return array( 'ok' => true, 'approved' => 1 === (int) $approved, 'verified' => (bool) $verified );
+	}
+
+	/* ------------------------------------------------------------ admin page */
+
+	public static function admin_menu() {
+		add_submenu_page( 'woocommerce', 'KefirBuy App', 'KefirBuy App', 'manage_woocommerce', 'kb-app', array( __CLASS__, 'admin_page' ) );
+	}
+
+	public static function admin_page() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			return;
+		}
+		$fields = array(
+			'peshawar'    => 'Delivery in Peshawar (Rs)',
+			'rider'       => 'Rider delivery for fresh items, Peshawar (Rs)',
+			'courier'     => 'Courier, rest of Pakistan (Rs)',
+			'free_over'   => 'Free delivery on orders over (Rs)',
+			'advance'     => 'Cash on delivery advance (Rs)',
+			'wallet_pct'  => 'JazzCash / EasyPaisa discount (%)',
+			'wallet_cap'  => 'JazzCash / EasyPaisa discount cap (Rs)',
+			'cutoff_hour' => 'Fresh order cut-off hour (0–23, Pakistan time)',
+		);
+		if ( isset( $_POST['kb_app_save'] ) && check_admin_referer( 'kb_app_settings' ) ) {
+			$new = array();
+			foreach ( array_keys( $fields ) as $k ) {
+				$new[ $k ] = isset( $_POST[ $k ] ) ? max( 0, (float) wp_unslash( $_POST[ $k ] ) ) : 0;
+			}
+			$new['cutoff_hour'] = min( 23, (int) $new['cutoff_hour'] );
+			$new['wallet_info'] = isset( $_POST['wallet_info'] ) ? sanitize_textarea_field( wp_unslash( $_POST['wallet_info'] ) ) : '';
+			update_option( 'kb_app_settings', $new, false );
+			echo '<div class="notice notice-success"><p>Saved. The app picks up the new values within 10 minutes.</p></div>';
+		}
+		$s = self::settings();
+		echo '<div class="wrap"><h1>KefirBuy App</h1><p>These numbers are shown in the app (product pages, cart and checkout). Real charges are always calculated by WooCommerce at checkout, so keep them matching your shipping and payment settings.</p><form method="post">';
+		wp_nonce_field( 'kb_app_settings' );
+		echo '<table class="form-table">';
+		foreach ( $fields as $k => $label ) {
+			printf( '<tr><th><label for="%1$s">%2$s</label></th><td><input type="number" step="any" min="0" id="%1$s" name="%1$s" value="%3$s" class="small-text"></td></tr>', esc_attr( $k ), esc_html( $label ), esc_attr( $s[ $k ] ) );
+		}
+		printf( '<tr><th><label for="wallet_info">JazzCash / EasyPaisa details shown after an order</label></th><td><textarea id="wallet_info" name="wallet_info" rows="4" class="large-text" placeholder="JazzCash: 03xx xxxxxxx (Account title)&#10;EasyPaisa: 03xx xxxxxxx (Account title)">%s</textarea><p class="description">Bank transfer details come from WooCommerce → Settings → Payments → Direct bank transfer.</p></td></tr>', esc_textarea( $s['wallet_info'] ) );
+		echo '</table><p><button class="button button-primary" name="kb_app_save" value="1">Save</button></p></form></div>';
 	}
 
 	public static function ping() {
